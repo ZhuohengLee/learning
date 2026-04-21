@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+tests/__pycache__/
+tests/tmp*/
+tests/_axis_model_case/
+artifacts/axis_models_smoke/
