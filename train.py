@@ -6,6 +6,13 @@ Reading route:
 3. Then read `train_models()` because it coordinates all three axis models.
 4. Finally read `_train_single_axis()` and `_augment_missing_axis_targets()`
    to see how one bundle is trained and how older logs are upgraded.
+
+Practical note:
+- The depth axis usually uses a continuous base command such as `u_base` in a signed range.
+- The forward axis does not need a continuous command yet; `forward_cmd_base = 0/1`
+  is a valid first-stage encoding (`0` no-forward-task, `1` forward-task-active).
+- The yaw axis does not need a continuous command yet; `yaw_cmd_base = -1/0/1`
+  is a valid first-stage encoding (`-1` left, `0` neutral, `1` right).
 """
 
 from __future__ import annotations  # Defer type-hint evaluation for cleaner forward references.
@@ -35,8 +42,8 @@ from learning.model import MLPRegressor  # Tiny pure-Python regressor used for t
 
 DEFAULT_AXIS_TARGETS = {
     "depth": "u_residual",  # Residual depth-control output.
-    "forward": "forward_cmd_residual",  # Residual forward-control output.
-    "yaw": "yaw_cmd_residual",  # Residual yaw-control output.
+    "forward": "forward_cmd_residual",  # Residual forward-control output; base values may be discrete `0/1` task codes.
+    "yaw": "yaw_cmd_residual",  # Residual yaw-control output; base values may be discrete `-1/0/1` task codes.
 }  # Keep the public three-axis defaults in one place.
 
 
@@ -85,7 +92,7 @@ def parse_args() -> argparse.Namespace:
         "--feature-columns",  # Flag name on the CLI.
         nargs="+",  # Accept one or more feature-column names.
         default=list(DEFAULT_UNIFIED_FEATURE_COLUMNS),  # Start from the shared public three-axis feature list.
-        help="Shared base feature columns used by the depth, forward, and yaw models",  # Explain the option.
+        help="Shared base feature columns used by the depth, forward, and yaw models. `forward_cmd_base=0/1` and `yaw_cmd_base=-1/0/1` are valid encodings.",  # Explain the option.
     )
     parser.add_argument("--hidden-dims", nargs="+", type=int, default=[24, 12])  # Hidden-layer widths.
     parser.add_argument("--epochs", type=int, default=300)  # Number of optimization epochs.
@@ -117,7 +124,11 @@ def train_models(
     print_every: int,
     axis_targets: dict[str, str],
 ) -> dict[str, object]:
-    """Train one residual model per control axis and return a manifest."""
+    """Train one residual model per control axis and return a manifest.
+
+    The trainer treats every feature column numerically. For forward and yaw this means
+    discrete task encodings such as `0/1` and `-1/0/1` work without special handling.
+    """
 
     output_dir.mkdir(parents=True, exist_ok=True)  # Ensure the destination directory exists.
     prepared_rows = _augment_missing_axis_targets(rows, axis_targets)  # Backfill residual targets when older logs lack them.
@@ -178,7 +189,12 @@ def _augment_missing_axis_targets(
     rows: Sequence[dict[str, str]],
     axis_targets: dict[str, str],
 ) -> list[dict[str, str]]:
-    """Backfill residual columns from total-base pairs when needed."""
+    """Backfill residual columns from total-base pairs when needed.
+
+    This works for both continuous commands and discrete task encodings. For example,
+    if `forward_cmd_base` is `0/1` and `forward_cmd_total` is also `0/1`, the derived
+    residual is still well-defined as `total - base`.
+    """
 
     derived_pairs = {
         axis_targets.get("depth", ""): ("u_total", "u_base"),  # Recover depth residual from total minus base.

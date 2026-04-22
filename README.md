@@ -16,6 +16,28 @@ final_command = base_controller_command + neural_residual
 
 也就是说，基线控制器先保证系统可控，神经网络只学习“还要补多少”。
 
+## 当前推荐的命令编码
+
+这个仓库当前默认兼容两种命令表达：
+
+- 连续控制量
+  例如 `u_base` 直接是 `-100 ~ 100` 这样的连续指令。
+- 离散任务编码
+  适合你目前这种“还没有前进多少、转向多少连续量”的阶段。
+
+当前对前进轴和转向轴，推荐先用离散任务编码：
+
+| 字段 | 推荐编码 | 含义 |
+| --- | --- | --- |
+| `forward_cmd_base` | `0 / 1` | `0` = 当前没有前进任务，`1` = 当前正在执行前进任务 |
+| `forward_cmd_residual` | 先固定 `0` | 神经网络未接入前先不补偿 |
+| `forward_cmd_total` | 先等于 `forward_cmd_base` | 最终前进任务命令 |
+| `yaw_cmd_base` | `-1 / 0 / 1` | `-1` = 左转，`0` = 不转，`1` = 右转 |
+| `yaw_cmd_residual` | 先固定 `0` | 神经网络未接入前先不补偿 |
+| `yaw_cmd_total` | 先等于 `yaw_cmd_base` | 最终转向任务命令 |
+
+这意味着当前训练代码不会假设前进和转向一定是连续力度。只要日志里编码稳定一致，第一版模型就能先学“任务状态 + 推进周期 + 姿态/扰动”的关系。
+
 ## 现在只有两个主脚本
 
 - [train.py](train.py)
@@ -55,6 +77,9 @@ final_command = base_controller_command + neural_residual
 6. `L50` 这种高层闭环命令执行期间的数据要保留，前进和转向任务的数据也要保留。
 7. 真正的 `j/k` 浮力直控帧不需要专门采，代码会自动过滤这类直控样本。
 8. 如果某个轴没有打印显式 residual 列，也必须至少打印这个轴的 `base` 和 `total`，这样训练代码才能用 `total - base` 自动恢复 residual target。
+9. 如果前进和转向还没有连续量，就按本 README 里的离散任务编码来记：
+   `forward_cmd_base = 0/1`
+   `yaw_cmd_base = -1/0/1`
 
 ## 采数同事的实现顺序
 
@@ -70,6 +95,9 @@ final_command = base_controller_command + neural_residual
    `u_base / u_residual / u_total`
    `forward_cmd_base / forward_cmd_residual / forward_cmd_total`
    `yaw_cmd_base / yaw_cmd_residual / yaw_cmd_total`
+   如果前进/转向还没有连续控制量，就直接使用离散任务编码：
+   `forward_cmd_base = 0/1`
+   `yaw_cmd_base = -1/0/1`
 7. 把最终输出映射成真正下发到执行器的方向、PWM 和开关状态，得到
    `buoyancy_dir_applied`、`buoyancy_pwm_applied`、`actuator_mask`
 8. 最后再把这一整行一次性写入 CSV。训练会把空字符串当成缺失值，所以训练相关列不要留空。
@@ -99,13 +127,13 @@ final_command = base_controller_command + neural_residual
 | `u_base` | 手写深度基线控制器输出 | 不是传感器量，是控制器内部变量 |
 | `u_residual` | 神经网络残差输出 | 神经网络未接入前固定写 `0` |
 | `u_total` | `u_base + u_residual` 再经过限幅后的结果 | 这是最终深度控制指令 |
-| `forward_cmd_base` | 手写前进控制器输出 | 不是传感器量，是控制器内部变量 |
+| `forward_cmd_base` | 手写前进任务编码或前进控制器输出 | 如果还没有连续前进量，推荐 `0` = 不前进，`1` = 前进 |
 | `forward_cmd_residual` | 神经网络前进残差输出 | 神经网络未接入前固定写 `0` |
-| `forward_cmd_total` | `forward_cmd_base + forward_cmd_residual` | 最终前进控制指令 |
+| `forward_cmd_total` | `forward_cmd_base + forward_cmd_residual` | 在离散编码阶段通常就等于 `0` 或 `1` |
 | `forward_phase_interval_ms` | 当前推进周期设置值 | 前进和转向模型都会用到 |
-| `yaw_cmd_base` | 手写转向控制器输出 | 不是传感器量，是控制器内部变量 |
+| `yaw_cmd_base` | 手写转向任务编码或转向控制器输出 | 如果还没有连续转向量，推荐 `-1` = 左转，`0` = 不转，`1` = 右转 |
 | `yaw_cmd_residual` | 神经网络转向残差输出 | 神经网络未接入前固定写 `0` |
-| `yaw_cmd_total` | `yaw_cmd_base + yaw_cmd_residual` | 最终转向控制指令 |
+| `yaw_cmd_total` | `yaw_cmd_base + yaw_cmd_residual` | 在离散编码阶段通常就等于 `-1 / 0 / 1` |
 | `buoyancy_dir_applied` | 根据 `u_total` 实际下发的浮力方向 | 记录最终真正执行的方向 |
 | `buoyancy_pwm_applied` | 根据 `u_total` 实际下发的 PWM | 记录最终真正执行的 PWM |
 | `actuator_mask` | 本周期实际打开了哪些执行器的 bitmask | 用最终执行状态，不是目标状态 |
@@ -122,6 +150,14 @@ final_command = base_controller_command + neural_residual
 - `forward_cmd_total = forward_cmd_base`
 - `yaw_cmd_residual = 0`
 - `yaw_cmd_total = yaw_cmd_base`
+
+如果前进和转向还没有连续量，直接这样记：
+
+- `forward_cmd_base = 0` 表示当前没有前进任务
+- `forward_cmd_base = 1` 表示当前正在前进
+- `yaw_cmd_base = -1` 表示左转
+- `yaw_cmd_base = 0` 表示不转
+- `yaw_cmd_base = 1` 表示右转
 
 换句话说，第一阶段最重要的不是“已经有残差”，而是先把基线控制器内部量打印出来。
 
@@ -176,11 +212,11 @@ emergency_stop
 
 ## 可以直接参考的 CSV 示例
 
-下面是一段最小示例，别人照这个格式输出就行：
+下面是一段最小示例，别人照这个格式输出就行。这里前进和转向都使用离散任务编码：
 
 ```csv
 session_id,timestamp_ms,dt_ms,robot_mode,control_mode,depth_valid,imu_valid,battery_v,target_depth_cm,filtered_depth_cm,depth_speed_cm_s,depth_accel_cm_s2,roll_deg,pitch_deg,gyro_x_deg_s,gyro_y_deg_s,gyro_z_deg_s,front_distance_cm,left_distance_cm,right_distance_cm,depth_err_cm,u_base,u_residual,u_total,forward_cmd_base,forward_cmd_residual,forward_cmd_total,forward_phase_interval_ms,yaw_cmd_base,yaw_cmd_residual,yaw_cmd_total,buoyancy_dir_applied,buoyancy_pwm_applied,actuator_mask,balancing,emergency_stop
-session_0007,15320,40,auto,auto,1,1,11.9,50.0,46.8,-2.4,0.3,1.8,-0.6,0.7,-1.1,0.2,85.0,110.0,96.0,3.2,24.0,-3.0,21.0,35.0,4.0,39.0,180.0,12.0,-2.0,10.0,1,132,13,0,0
+session_0007,15320,40,auto,auto,1,1,11.9,50.0,46.8,-2.4,0.3,1.8,-0.6,0.7,-1.1,0.2,85.0,110.0,96.0,3.2,24.0,0.0,24.0,1,0,1,180.0,1,0,1,1,132,13,0,0
 ```
 
 ## 训练时真正会用到哪些列
@@ -229,6 +265,12 @@ session_0007,15320,40,auto,auto,1,1,11.9,50.0,46.8,-2.4,0.3,1.8,-0.6,0.7,-1.1,0.
 - `forward_cmd_base`
 - `forward_phase_interval_ms`
 - `yaw_cmd_base`
+
+说明：
+
+- 当前代码允许 `forward_cmd_base` 用 `0/1` 离散编码
+- 当前代码允许 `yaw_cmd_base` 用 `-1/0/1` 离散编码
+- 训练时它们会被当作普通数值特征，不要求必须是连续力度
 
 ### 三个轴的 target 规则
 

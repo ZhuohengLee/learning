@@ -45,9 +45,9 @@ DEFAULT_MULTI_AXIS_FEATURE_COLUMNS = [
     "right_distance_cm",  # Right sonar distance in centimeters.
     "battery_v",  # Battery voltage shared across axes.
     "u_base",  # Hand-written depth controller output before residual trim.
-    "forward_cmd_base",  # Hand-written forward command before residual trim.
-    "forward_phase_interval_ms",  # Current forward propulsion phase interval in milliseconds.
-    "yaw_cmd_base",  # Hand-written yaw command before residual trim.
+    "forward_cmd_base",  # Forward-task code before residual trim; `0/1` is valid when no continuous thrust command exists yet.
+    "forward_phase_interval_ms",  # Current forward propulsion phase interval in milliseconds; pairs with the discrete forward-task code.
+    "yaw_cmd_base",  # Yaw-task code before residual trim; `-1/0/1` is valid when no continuous yaw command exists yet.
 ]
 DEFAULT_UNIFIED_FEATURE_COLUMNS = list(  # One shared feature set used by the public three-axis trainer.
     dict.fromkeys(  # Preserve feature order while removing duplicates that appear in both source lists.
@@ -61,8 +61,8 @@ DEFAULT_TARGET_PRIORITY = ["residual_target_pwm", "u_residual"]  # Try these res
 TARGET_FALLBACK_PAIRS = {
     "residual_target_pwm": ("u_total", "u_base"),  # Recover depth residual when the legacy explicit field is absent.
     "u_residual": ("u_total", "u_base"),  # Recover depth residual from total minus base.
-    "forward_cmd_residual": ("forward_cmd_total", "forward_cmd_base"),  # Recover forward residual from total minus base.
-    "yaw_cmd_residual": ("yaw_cmd_total", "yaw_cmd_base"),  # Recover yaw residual from total minus base.
+    "forward_cmd_residual": ("forward_cmd_total", "forward_cmd_base"),  # Recover forward residual from total minus base, even when the base command is a discrete task code.
+    "yaw_cmd_residual": ("yaw_cmd_total", "yaw_cmd_base"),  # Recover yaw residual from total minus base, even when the base command is a discrete task code.
 }  # Map residual field names to their `(total, base)` fallback columns.
 
 
