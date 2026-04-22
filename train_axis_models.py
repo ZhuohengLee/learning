@@ -1,7 +1,7 @@
 """Train separate residual models for depth, forward, and yaw control.
 
 Reading route:
-1. Start with `main()` to see the command-line workflow.
+1. Start with `main()` only if you need the low-level shared-feature training CLI.
 2. Then read `train_axis_models()` because it coordinates all axis-specific training.
 3. Then read `train_single_axis()` to understand one model's train/eval/export path.
 4. Finally read `_augment_missing_axis_targets()` to see how older logs are upgraded.
@@ -21,7 +21,7 @@ if __package__ in {None, ""}:  # Detect direct script execution outside package 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # Add the repo root to `sys.path`.
 
 from learning.data import (  # Reuse telemetry loading and dataset-prep helpers.
-    DEFAULT_MULTI_AXIS_FEATURE_COLUMNS,  # Default shared feature set for multi-axis training.
+    DEFAULT_UNIFIED_FEATURE_COLUMNS,  # Default shared feature set for the public three-axis trainer.
     DEFAULT_WINDOW_SIZE,  # Default number of stacked frames per sample.
     Example,  # Typed training example record.
     build_examples,  # Convert raw rows into windowed examples.
@@ -75,14 +75,14 @@ def parse_args() -> argparse.Namespace:
     """Define and parse command-line arguments for axis-wise training."""
 
     parser = argparse.ArgumentParser(  # Build the CLI parser.
-        description="Train separate residual models for depth, forward, and yaw control.",  # Describe the tool.
+        description="Train separate residual models for depth, forward, and yaw control with one shared feature set.",  # Describe the tool.
     )
     parser.add_argument("--csv", required=True, help="Path to control telemetry CSV")  # Input telemetry file.
     parser.add_argument("--output-dir", required=True, help="Directory for exported model bundles")  # Output directory.
     parser.add_argument(
         "--feature-columns",  # Flag name on the CLI.
         nargs="+",  # Accept one or more feature-column names.
-        default=list(DEFAULT_MULTI_AXIS_FEATURE_COLUMNS),  # Start from the default shared feature list.
+        default=list(DEFAULT_UNIFIED_FEATURE_COLUMNS),  # Start from the default shared feature list.
         help="Shared feature columns used for every axis model",  # Explain the option.
     )
     parser.add_argument("--window-size", type=int, default=DEFAULT_WINDOW_SIZE)  # Stacked history length.

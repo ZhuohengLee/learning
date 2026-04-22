@@ -49,6 +49,14 @@ DEFAULT_MULTI_AXIS_FEATURE_COLUMNS = [
     "forward_phase_interval_ms",  # Current forward propulsion phase interval in milliseconds.
     "yaw_cmd_base",  # Hand-written yaw command before residual trim.
 ]
+DEFAULT_UNIFIED_FEATURE_COLUMNS = list(  # One shared feature set used by the public three-axis trainer.
+    dict.fromkeys(  # Preserve feature order while removing duplicates that appear in both source lists.
+        [
+            *DEFAULT_FEATURE_COLUMNS,  # Keep depth-state and buoyancy history in the shared input state.
+            *DEFAULT_MULTI_AXIS_FEATURE_COLUMNS,  # Add motion and controller context needed by forward/yaw.
+        ]
+    )
+)
 DEFAULT_TARGET_PRIORITY = ["residual_target_pwm", "u_residual"]  # Try these residual fields in order.
 TARGET_FALLBACK_PAIRS = {
     "residual_target_pwm": ("u_total", "u_base"),  # Recover depth residual when the legacy explicit field is absent.

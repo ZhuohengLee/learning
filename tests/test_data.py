@@ -8,9 +8,13 @@ Reading route:
 """
 
 import csv  # Build temporary CSV fixtures for edge-case tests.
+import sys  # Adjust the import path when the standalone repo is executed directly.
 import tempfile  # Create temporary files safely during testing.
 import unittest  # Use the standard-library test framework.
 from pathlib import Path  # Build fixture paths safely across platforms.
+
+if __package__ in {None, ""}:  # Detect direct test-module execution outside package mode.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))  # Add the parent of the repo root so `learning` can be imported.
 
 from learning.data import (  # Import the data-pipeline helpers under test.
     DEFAULT_FEATURE_COLUMNS,  # Default depth-training feature set.
