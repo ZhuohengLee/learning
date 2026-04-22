@@ -16,22 +16,32 @@ final_command = base_controller_command + neural_residual
 
 也就是说，基线控制器先保证系统可控，神经网络只学习“还要补多少”。
 
+## 现在只有两个主脚本
+
+- [train.py](train.py)
+  唯一训练入口。一次读一个 CSV，同时训练 `depth / forward / yaw` 三个模型。
+- [export.py](export.py)
+  唯一导出入口。既可以一次导出三轴，也可以单独导出一个模型 bundle。
+
+剩下的 Python 文件只负责：
+
+- [data.py](data.py)
+  训练数据读取、过滤、滑动窗口、target 回退规则。
+- [model.py](model.py)
+  纯 Python 小型 MLP。
+
 ## 阅读路线
 
 建议按这个顺序看：
 
 1. [data.py](data.py)
    先看训练数据是怎么过滤、切片、构造 target 的。
-2. [train_residual.py](train_residual.py)
-   这是公开单入口，一次训练 `depth / forward / yaw` 三个模型。
-3. [train_axis_models.py](train_axis_models.py)
-   这是被单入口复用的底层 helper。
-4. [model.py](model.py)
+2. [train.py](train.py)
+   看公开单入口如何一次训练 `depth / forward / yaw` 三个模型。
+3. [model.py](model.py)
    看小型 MLP 的结构和训练过程。
-5. [export_axis_models_to_esp32.py](export_axis_models_to_esp32.py)
-   看三个模型怎么一次导出到 ESP32。
-6. [export_to_esp32.py](export_to_esp32.py)
-   看单个模型 bundle 怎么转成板端头文件。
+4. [export.py](export.py)
+   看训练后怎么导出成 ESP32 头文件。
 
 ## 发给采数同事的直接要求
 
@@ -131,7 +141,7 @@ session_0007,15320,40,auto,auto,1,1,11.9,50.0,46.8,-2.4,0.3,1.8,-0.6,0.7,-1.1,0.
 
 ### 默认共享输入特征
 
-`train_residual.py` 默认使用下面这些输入列训练三个轴：
+`train.py` 默认使用下面这些输入列训练三个轴：
 
 - `depth_err_cm`
 - `depth_speed_cm_s`
@@ -172,7 +182,7 @@ session_0007,15320,40,auto,auto,1,1,11.9,50.0,46.8,-2.4,0.3,1.8,-0.6,0.7,-1.1,0.
 在这个仓库根目录下运行：
 
 ```powershell
-python train_residual.py `
+python train.py `
   --csv D:\path\to\sensors.csv `
   --output-dir artifacts\axis_models
 ```
@@ -196,7 +206,7 @@ python train_residual.py `
 示例：
 
 ```powershell
-python train_residual.py `
+python train.py `
   --csv D:\path\to\sensors.csv `
   --output-dir artifacts\axis_models `
   --window-size 5 `
@@ -214,10 +224,10 @@ python train_residual.py `
 
 ## 导出到 ESP32
 
-如果要把三个模型一起导到你的固件仓库：
+### 一次导出三轴
 
 ```powershell
-python export_axis_models_to_esp32.py `
+python export.py `
   --model-dir artifacts\axis_models `
   --output-dir D:\path\to\Squid-Robot\ESP32
 ```
@@ -228,10 +238,10 @@ python export_axis_models_to_esp32.py `
 - `ForwardResidualModelData.h`
 - `YawResidualModelData.h`
 
-如果你只想单独导出一个 bundle：
+### 单独导出一个 bundle
 
 ```powershell
-python export_to_esp32.py `
+python export.py `
   --model artifacts\axis_models\forward_model.json `
   --output D:\path\to\Squid-Robot\ESP32\ForwardResidualModelData.h `
   --namespace forward_residual_model `
@@ -256,8 +266,6 @@ python -m unittest discover tests -v
 最少要同步检查这些文件：
 
 - [data.py](data.py)
-- [train_residual.py](train_residual.py)
-- [train_axis_models.py](train_axis_models.py)
-- [export_to_esp32.py](export_to_esp32.py)
-- [export_axis_models_to_esp32.py](export_axis_models_to_esp32.py)
+- [train.py](train.py)
+- [export.py](export.py)
 - 这个 README

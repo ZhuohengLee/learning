@@ -1,9 +1,10 @@
-"""Tests for converting a trained bundle into an ESP32 header.
+"""Tests for converting trained bundles into ESP32 headers.
 
 Reading route:
 1. Start with `test_render_header_contains_expected_dimensions()` to see the happy-path export contract.
 2. Then read `test_render_header_accepts_shared_three_axis_contract()` to see the unified three-axis export path.
-3. Finally read `test_render_header_rejects_feature_order_mismatch()` to see the strict safety check.
+3. Then read `test_export_axis_models_writes_three_headers()` to see the batch export path.
+4. Finally read `test_render_header_rejects_feature_order_mismatch()` to see the strict safety check.
 """
 
 import json  # Load the sample model bundle from disk.
@@ -16,8 +17,7 @@ if __package__ in {None, ""}:  # Detect direct test-module execution outside pac
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))  # Add the parent of the repo root so `learning` can be imported.
 
 from learning.data import DEFAULT_UNIFIED_FEATURE_COLUMNS  # Reuse the shared public feature contract.
-from learning.export_axis_models_to_esp32 import export_axis_models  # Import the three-axis batch exporter under test.
-from learning.export_to_esp32 import render_header  # Import the exporter under test.
+from learning.export import export_axis_models, render_header  # Import the exporter under test.
 
 
 SAMPLE_MODEL_PATH = Path(__file__).resolve().parent.parent / "artifacts" / "sample_model.json"  # Reuse the checked-in sample bundle.
@@ -54,7 +54,7 @@ def _build_shared_payload(*, axis_name: str) -> dict[str, object]:
     }  # Return a minimal but valid shared-feature payload.
 
 
-class ExportToEsp32Tests(unittest.TestCase):  # Group header-export tests together.
+class ExportTests(unittest.TestCase):  # Group header-export tests together.
     """Verify that header generation keeps the firmware contract intact."""
 
     def test_render_header_contains_expected_dimensions(self) -> None:
@@ -92,7 +92,7 @@ class ExportToEsp32Tests(unittest.TestCase):  # Group header-export tests togeth
         """Verify that the batch exporter writes depth, forward, and yaw headers together."""
 
         tests_dir = Path(__file__).resolve().parent  # Place temporary artifacts beside the test file.
-        temp_path = tests_dir / "_axis_export_case"  # Use a dedicated temporary directory for this test.
+        temp_path = tests_dir / "_export_case"  # Use a dedicated temporary directory for this test.
         if temp_path.exists():  # Remove leftovers from previous interrupted runs.
             shutil.rmtree(temp_path, ignore_errors=True)  # Best-effort cleanup before the test starts.
         temp_path.mkdir(parents=True, exist_ok=True)  # Create the temporary directory tree.

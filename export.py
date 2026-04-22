@@ -1,26 +1,42 @@
-"""Export a trained residual model bundle into an ESP32 C++ header.
+"""Export residual model bundles into ESP32 C++ header files.
 
 Reading route:
-1. Start with `main()` to see the file-in / file-out workflow.
-2. Then read `render_header()` because it defines the full firmware export format.
-3. Then read `_read_layer()` to see how JSON weights are parsed.
-4. Finally read `_format_float()`, `_format_1d_array()`, and `_format_2d_array()`
-   to see how Python values become C++ constants.
+1. Start with `main()` to see the public export entry point.
+2. Then read `parse_args()` to understand single-bundle vs three-axis modes.
+3. Then read `export_axis_models()` for the batch depth/forward/yaw path.
+4. Finally read `render_header()` for the actual firmware header format.
 """
 
 from __future__ import annotations  # Defer type-hint evaluation for cleaner forward references.
 
 import argparse  # Parse command-line arguments for the export CLI.
-import json  # Load the serialized model bundle from disk.
+import json  # Load the serialized model bundles from disk.
 from pathlib import Path  # Build input and output paths safely across platforms.
 import sys  # Adjust import path when running this file as a script.
 
 if __package__ in {None, ""}:  # Detect direct script execution outside package mode.
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # Add the repo root to `sys.path`.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # Add the parent of the repo root so `learning` can be imported.
 
 from learning.data import DEFAULT_FEATURE_COLUMNS, DEFAULT_UNIFIED_FEATURE_COLUMNS  # Reuse the training-side feature contracts.
 
 
+AXIS_EXPORTS = {
+    "depth": {
+        "filename": "DepthResidualModelData.h",  # Default output header for the depth model.
+        "namespace": "depth_residual_model",  # Firmware namespace used by the depth controller.
+        "include_guard": "ESP32_DEPTH_RESIDUAL_MODEL_DATA_H",  # Include guard for the depth header.
+    },
+    "forward": {
+        "filename": "ForwardResidualModelData.h",  # Default output header for the forward model.
+        "namespace": "forward_residual_model",  # Firmware namespace used by the forward controller.
+        "include_guard": "ESP32_FORWARD_RESIDUAL_MODEL_DATA_H",  # Include guard for the forward header.
+    },
+    "yaw": {
+        "filename": "YawResidualModelData.h",  # Default output header for the yaw model.
+        "namespace": "yaw_residual_model",  # Firmware namespace used by the yaw controller.
+        "include_guard": "ESP32_YAW_RESIDUAL_MODEL_DATA_H",  # Include guard for the yaw header.
+    },
+}  # Map each logical control axis to its default firmware export target.
 SUPPORTED_FEATURE_CONTRACTS = {
     "depth_legacy": list(DEFAULT_FEATURE_COLUMNS),  # Keep supporting the original depth-only firmware contract.
     "shared_three_axis": list(DEFAULT_UNIFIED_FEATURE_COLUMNS),  # Support the shared feature contract used by depth/forward/yaw together.
@@ -31,40 +47,99 @@ MAX_ESP32_HIDDEN2_SIZE = 64  # Match the second hidden-layer ceiling enforced by
 
 
 def main() -> None:
-    """CLI entry point for turning a JSON model bundle into a C++ header."""
+    """CLI entry point for exporting one or three residual bundles."""
 
     args = parse_args()  # Parse all user-supplied export options.
-    payload = json.loads(Path(args.model).read_text(encoding="utf-8"))  # Load the trained model bundle from JSON.
-    header_text = render_header(
-        payload=payload,  # Pass the full JSON bundle.
+    if args.model_dir:  # Use batch mode when a model directory is supplied.
+        export_axis_models(
+            model_dir=Path(args.model_dir),  # Read axis bundles from this directory.
+            output_dir=Path(args.output_dir),  # Write generated headers into this directory.
+        )
+        return  # Stop after finishing the batch export.
+
+    export_model(
+        model_path=Path(args.model),  # Read one JSON model bundle from this path.
+        output_path=Path(args.output),  # Write one generated header to this path.
         namespace=args.namespace,  # Use the requested C++ namespace.
         include_guard=args.include_guard,  # Use the requested include guard.
-    )  # Convert the bundle into C++ header text.
-    output_path = Path(args.output)  # Normalize the destination path.
+    )  # Run the single-bundle export path.
+
+
+def parse_args() -> argparse.Namespace:
+    """Define and parse command-line arguments for model export."""
+
+    parser = argparse.ArgumentParser(
+        description="Export one residual model bundle or a depth/forward/yaw model directory into ESP32 headers.",  # Describe the tool.
+    )  # Build the CLI parser.
+    parser.add_argument("--model", help="Path to a single residual model bundle JSON file")  # Optional single-bundle input path.
+    parser.add_argument("--output", help="Path to the generated .h file for single-bundle export")  # Optional single-bundle output path.
+    parser.add_argument("--model-dir", help="Directory containing depth/forward/yaw model JSON bundles")  # Optional three-axis input directory.
+    parser.add_argument("--output-dir", help="Directory that will receive the generated ESP32 headers")  # Optional three-axis output directory.
+    parser.add_argument(
+        "--namespace",  # Flag name on the CLI.
+        default="residual_model",  # Use the default firmware namespace unless overridden.
+        help="C++ namespace for single-bundle export",  # Explain the option.
+    )
+    parser.add_argument(
+        "--include-guard",  # Flag name on the CLI.
+        default="ESP32_RESIDUAL_MODEL_DATA_H",  # Use the default include guard unless overridden.
+        help="Header include guard for single-bundle export",  # Explain the option.
+    )
+    args = parser.parse_args()  # Parse the raw CLI first so cross-argument validation can run.
+
+    single_mode = bool(args.model)  # Detect the one-bundle export path.
+    batch_mode = bool(args.model_dir)  # Detect the depth/forward/yaw batch export path.
+    if single_mode == batch_mode:  # Reject ambiguous or empty mode selection.
+        parser.error("choose either --model for single-bundle export or --model-dir for batch export")  # Explain the allowed modes.
+    if single_mode and not args.output:  # Require a destination file in single-bundle mode.
+        parser.error("--output is required when using --model")  # Explain the missing argument.
+    if batch_mode and not args.output_dir:  # Require a destination directory in batch mode.
+        parser.error("--output-dir is required when using --model-dir")  # Explain the missing argument.
+    if args.output and not single_mode:  # Reject a single-bundle output path in batch mode.
+        parser.error("--output can only be used with --model")  # Explain the invalid combination.
+    if args.output_dir and not batch_mode:  # Reject a batch output directory in single-bundle mode.
+        parser.error("--output-dir can only be used with --model-dir")  # Explain the invalid combination.
+    return args  # Return the validated argument namespace.
+
+
+def export_model(
+    *,
+    model_path: Path,
+    output_path: Path,
+    namespace: str = "residual_model",
+    include_guard: str = "ESP32_RESIDUAL_MODEL_DATA_H",
+) -> None:
+    """Export one JSON bundle into one ESP32 header file."""
+
+    payload = json.loads(model_path.read_text(encoding="utf-8"))  # Load the trained model bundle from JSON.
+    header_text = render_header(
+        payload=payload,  # Convert the bundle into C++ header text.
+        namespace=namespace,  # Use the requested C++ namespace.
+        include_guard=include_guard,  # Use the requested include guard.
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)  # Create parent directories when needed.
     output_path.write_text(header_text, encoding="utf-8")  # Save the generated header to disk.
     print(f"wrote ESP32 model header to {output_path}")  # Tell the user where the header was written.
 
 
-def parse_args() -> argparse.Namespace:
-    """Define and parse command-line arguments for header generation."""
+def export_axis_models(*, model_dir: Path, output_dir: Path) -> None:
+    """Export every expected axis bundle into its matching ESP32 header."""
 
-    parser = argparse.ArgumentParser(
-        description="Render a trained residual model JSON bundle as an ESP32 C++ header.",  # Describe the tool.
-    )  # Build the CLI parser.
-    parser.add_argument("--model", required=True, help="Path to a residual model bundle JSON file")  # Input bundle path.
-    parser.add_argument("--output", required=True, help="Path to the generated .h file")  # Output header path.
-    parser.add_argument(
-        "--namespace",  # Flag name on the CLI.
-        default="residual_model",  # Use the default firmware namespace unless overridden.
-        help="C++ namespace for the generated constants",  # Explain the option.
-    )
-    parser.add_argument(
-        "--include-guard",  # Flag name on the CLI.
-        default="ESP32_RESIDUAL_MODEL_DATA_H",  # Use the default include guard unless overridden.
-        help="Header include guard",  # Explain the option.
-    )
-    return parser.parse_args()  # Return the parsed argument namespace.
+    output_dir.mkdir(parents=True, exist_ok=True)  # Ensure the destination directory exists before writing headers.
+    for axis_name, export_config in AXIS_EXPORTS.items():  # Visit every supported control axis.
+        bundle_path = model_dir / f"{axis_name}_model.json"  # Build the expected JSON bundle path for this axis.
+        if not bundle_path.is_file():  # Fail fast when a required axis bundle is missing.
+            raise FileNotFoundError(f"missing axis model bundle: {bundle_path}")  # Explain which bundle is absent.
+
+        payload = json.loads(bundle_path.read_text(encoding="utf-8"))  # Load the trained model bundle from disk.
+        header_text = render_header(
+            payload=payload,  # Convert this bundle into an ESP32 header.
+            namespace=str(export_config["namespace"]),  # Use the axis-specific firmware namespace.
+            include_guard=str(export_config["include_guard"]),  # Use the axis-specific include guard.
+        )
+        output_path = output_dir / str(export_config["filename"])  # Build the destination header path for this axis.
+        output_path.write_text(header_text, encoding="utf-8")  # Save the generated header text.
+        print(f"[{axis_name}] wrote ESP32 model header to {output_path}")  # Tell the user where this axis header was written.
 
 
 def render_header(
@@ -126,7 +201,7 @@ def render_header(
         f"#ifndef {include_guard}",  # Start the include guard.
         f"#define {include_guard}",  # Define the include guard symbol.
         "",  # Separate the guard from the comment block.
-        "// Auto-generated by learning/export_to_esp32.py.",  # Document the generator.
+        "// Auto-generated by learning/export.py.",  # Document the generator.
         "// Regenerate this file after retraining the residual controller.",  # Tell users not to edit manually.
         "// Feature contract: " + contract_name,  # Freeze which firmware-side feature contract this bundle targets.
         "// Feature order: " + ", ".join(feature_columns),  # Freeze the exact firmware input order in the header.
@@ -253,4 +328,4 @@ def _format_2d_array(name: str, rows: list[list[float]]) -> str:
 
 
 if __name__ == "__main__":  # Run the CLI when the file is executed directly.
-    main()  # Start header export.
+    main()  # Start model export.
