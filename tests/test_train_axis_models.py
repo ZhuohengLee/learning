@@ -1,114 +1,127 @@
-import csv
-import json
-import shutil
-import unittest
-from pathlib import Path
+"""Tests for multi-axis residual model training and export.
 
-from learning.data import DEFAULT_MULTI_AXIS_FEATURE_COLUMNS
-from learning.train_axis_models import train_axis_models
+Reading route:
+1. Start with `test_train_axis_models_exports_three_bundles()` because it covers the full multi-axis path.
+2. While reading it, focus first on the synthetic CSV generation block.
+3. Then focus on the `train_axis_models(...)` call.
+4. Finish with the assertions that check the manifest and exported bundle files.
+"""
+
+import csv  # Build synthetic telemetry CSV files for the test case.
+import json  # Read the exported model bundles back from disk.
+import shutil  # Remove temporary test directories after the test.
+import unittest  # Use the standard-library test framework.
+from pathlib import Path  # Build temporary paths safely across platforms.
+
+from learning.data import DEFAULT_MULTI_AXIS_FEATURE_COLUMNS  # Reuse the default shared multi-axis feature set.
+from learning.train_axis_models import train_axis_models  # Import the trainer under test.
 
 
-class TrainAxisModelsTests(unittest.TestCase):
+class TrainAxisModelsTests(unittest.TestCase):  # Group multi-axis training tests together.
+    """Check that axis-wise training exports one bundle per requested axis."""
+
     def test_train_axis_models_exports_three_bundles(self) -> None:
-        tests_dir = Path(__file__).resolve().parent
-        temp_path = tests_dir / "_axis_model_case"
-        if temp_path.exists():
-            shutil.rmtree(temp_path, ignore_errors=True)
-        temp_path.mkdir(parents=True, exist_ok=True)
-        try:
-            csv_path = temp_path / "telemetry.csv"
-            output_dir = temp_path / "models"
+        """Verify that depth, forward, and yaw bundles are all exported."""
+
+        tests_dir = Path(__file__).resolve().parent  # Place temporary artifacts beside the test file.
+        temp_path = tests_dir / "_axis_model_case"  # Use a dedicated temporary directory for this test.
+        if temp_path.exists():  # Remove leftovers from previous interrupted runs.
+            shutil.rmtree(temp_path, ignore_errors=True)  # Best-effort cleanup before the test starts.
+        temp_path.mkdir(parents=True, exist_ok=True)  # Create the temporary directory tree.
+        try:  # Ensure temporary artifacts are removed even if assertions fail.
+            csv_path = temp_path / "telemetry.csv"  # Name the synthetic telemetry file.
+            output_dir = temp_path / "models"  # Name the directory that will receive exported bundles.
 
             fieldnames = [
-                "session_id",
-                "timestamp_ms",
-                "control_mode",
-                "depth_valid",
-                "imu_valid",
-                "balancing",
-                "emergency_stop",
-                *DEFAULT_MULTI_AXIS_FEATURE_COLUMNS,
-                "u_base",
-                "u_total",
-                "forward_cmd_base",
-                "forward_cmd_total",
-                "yaw_cmd_base",
-                "yaw_cmd_total",
-            ]
+                "session_id",  # Session id used by the splitter.
+                "timestamp_ms",  # Frame timestamp in milliseconds.
+                "control_mode",  # Autonomous/manual control flag.
+                "depth_valid",  # Depth sensor validity flag.
+                "imu_valid",  # IMU validity flag.
+                "balancing",  # Balance-mode flag.
+                "emergency_stop",  # Emergency-stop flag.
+                *DEFAULT_MULTI_AXIS_FEATURE_COLUMNS,  # Shared multi-axis input features.
+                "u_base",  # Depth base control output.
+                "u_total",  # Depth total control output.
+                "forward_cmd_base",  # Forward base control output.
+                "forward_cmd_total",  # Forward total control output.
+                "yaw_cmd_base",  # Yaw base control output.
+                "yaw_cmd_total",  # Yaw total control output.
+            ]  # Define the minimal synthetic telemetry schema required by the trainer.
 
-            with csv_path.open("w", newline="", encoding="utf-8") as handle:
-                writer = csv.DictWriter(handle, fieldnames=fieldnames)
-                writer.writeheader()
-                for session_index, session_id in enumerate(["A", "B"]):
-                    for step in range(6):
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:  # Open the synthetic CSV for writing.
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)  # Build a CSV writer with the chosen schema.
+                writer.writeheader()  # Emit the CSV header row.
+                for session_index, session_id in enumerate(["A", "B"]):  # Create two sessions so one can land in validation.
+                    for step in range(6):  # Create enough rows per session for multiple windows.
                         writer.writerow(
                             {
-                                "session_id": session_id,
-                                "timestamp_ms": session_index * 1000 + step * 50,
-                                "control_mode": 1,
-                                "depth_valid": 1,
-                                "imu_valid": 1,
-                                "balancing": 0,
-                                "emergency_stop": 0,
-                                "depth_err_cm": 2.0 - step * 0.2,
-                                "depth_speed_cm_s": -0.3 + step * 0.02,
-                                "depth_accel_cm_s2": 0.05,
-                                "roll_deg": 0.1 * step,
-                                "pitch_deg": -0.05 * step,
-                                "gyro_x_deg_s": 0.01 * step,
-                                "gyro_y_deg_s": 0.02 * step,
-                                "gyro_z_deg_s": 0.03 * step,
-                                "front_distance_cm": 60.0 - step,
-                                "left_distance_cm": 35.0 + step,
-                                "right_distance_cm": 32.0 - step * 0.5,
-                                "battery_v": 11.8 - session_index * 0.1,
-                                "u_base": 78.0 + step,
-                                "u_total": 80.0 + step,
-                                "forward_cmd_base": 68.0 - step,
-                                "forward_cmd_total": 70.0 - step,
-                                "yaw_cmd_base": -18.0 + step,
-                                "yaw_cmd_total": -20.0 + step,
+                                "session_id": session_id,  # Keep rows grouped by synthetic session.
+                                "timestamp_ms": session_index * 1000 + step * 50,  # Space frames 50 ms apart per session.
+                                "control_mode": 1,  # Mark all rows as autonomous.
+                                "depth_valid": 1,  # Mark depth as valid.
+                                "imu_valid": 1,  # Mark IMU as valid.
+                                "balancing": 0,  # Keep the row outside balance mode.
+                                "emergency_stop": 0,  # Keep the row outside emergency-stop mode.
+                                "depth_err_cm": 2.0 - step * 0.2,  # Vary depth error smoothly across the session.
+                                "depth_speed_cm_s": -0.3 + step * 0.02,  # Vary depth speed slightly.
+                                "depth_accel_cm_s2": 0.05,  # Keep depth acceleration constant for simplicity.
+                                "roll_deg": 0.1 * step,  # Vary roll slightly across the session.
+                                "pitch_deg": -0.05 * step,  # Vary pitch slightly across the session.
+                                "gyro_x_deg_s": 0.01 * step,  # Vary gyro-x slightly across the session.
+                                "gyro_y_deg_s": 0.02 * step,  # Vary gyro-y slightly across the session.
+                                "gyro_z_deg_s": 0.03 * step,  # Vary gyro-z slightly across the session.
+                                "front_distance_cm": 60.0 - step,  # Vary front sonar distance slightly.
+                                "left_distance_cm": 35.0 + step,  # Vary left sonar distance slightly.
+                                "right_distance_cm": 32.0 - step * 0.5,  # Vary right sonar distance slightly.
+                                "battery_v": 11.8 - session_index * 0.1,  # Use a slightly different battery voltage per session.
+                                "u_base": 78.0 + step,  # Depth base command.
+                                "u_total": 80.0 + step,  # Depth total command.
+                                "forward_cmd_base": 68.0 - step,  # Forward base command.
+                                "forward_phase_interval_ms": 1000.0 + session_index * 50.0,  # Forward phase interval recorded in telemetry.
+                                "forward_cmd_total": 70.0 - step,  # Forward total command.
+                                "yaw_cmd_base": -18.0 + step,  # Yaw base command.
+                                "yaw_cmd_total": -20.0 + step,  # Yaw total command.
                             }
-                        )
+                        )  # Write one synthetic telemetry row.
 
-            rows = []
-            with csv_path.open("r", newline="", encoding="utf-8") as handle:
-                reader = csv.DictReader(handle)
-                rows = [dict(row) for row in reader]
+            with csv_path.open("r", newline="", encoding="utf-8") as handle:  # Reopen the synthetic CSV for reading.
+                reader = csv.DictReader(handle)  # Parse rows as dictionaries.
+                rows = [dict(row) for row in reader]  # Materialize all rows for the trainer API.
 
             manifest = train_axis_models(
-                rows=rows,
-                output_dir=output_dir,
-                feature_columns=DEFAULT_MULTI_AXIS_FEATURE_COLUMNS,
-                window_size=3,
-                hidden_dims=(8, 4),
-                epochs=10,
-                learning_rate=0.02,
-                l2=1e-4,
-                val_fraction=0.5,
-                max_dt_ms=80.0,
-                seed=7,
-                print_every=5,
+                rows=rows,  # Pass the synthetic telemetry rows.
+                output_dir=output_dir,  # Write exported bundles into the temporary model directory.
+                feature_columns=DEFAULT_MULTI_AXIS_FEATURE_COLUMNS,  # Use the default shared multi-axis features.
+                window_size=3,  # Stack three frames per example.
+                hidden_dims=(8, 4),  # Use a small test-friendly architecture.
+                epochs=10,  # Keep training short so the test runs quickly.
+                learning_rate=0.02,  # Use a moderate learning rate.
+                l2=1e-4,  # Apply a small amount of L2 regularization.
+                val_fraction=0.5,  # Reserve one synthetic session for validation.
+                max_dt_ms=80.0,  # Treat 50 ms row spacing as contiguous.
+                seed=7,  # Make the split and initialization reproducible.
+                print_every=5,  # Print progress midway and at the end.
                 axis_targets={
-                    "depth": "u_residual",
-                    "forward": "forward_cmd_residual",
-                    "yaw": "yaw_cmd_residual",
+                    "depth": "u_residual",  # Train the depth residual model.
+                    "forward": "forward_cmd_residual",  # Train the forward residual model.
+                    "yaw": "yaw_cmd_residual",  # Train the yaw residual model.
                 },
-            )
+            )  # Train and export all requested axis models.
 
-            self.assertIn("depth", manifest["axes"])
-            self.assertIn("forward", manifest["axes"])
-            self.assertIn("yaw", manifest["axes"])
+            self.assertIn("depth", manifest["axes"])  # Manifest should contain a depth entry.
+            self.assertIn("forward", manifest["axes"])  # Manifest should contain a forward entry.
+            self.assertIn("yaw", manifest["axes"])  # Manifest should contain a yaw entry.
 
-            for axis_name in ("depth", "forward", "yaw"):
-                bundle_path = output_dir / f"{axis_name}_model.json"
-                self.assertTrue(bundle_path.is_file())
-                bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
-                self.assertEqual(bundle["metadata"]["axis"], axis_name)
-                self.assertEqual(bundle["metadata"]["window_size"], 3)
+            for axis_name in ("depth", "forward", "yaw"):  # Inspect every expected exported axis bundle.
+                bundle_path = output_dir / f"{axis_name}_model.json"  # Build the expected bundle path.
+                self.assertTrue(bundle_path.is_file())  # Exported bundle file should exist on disk.
+                bundle = json.loads(bundle_path.read_text(encoding="utf-8"))  # Load the bundle back from disk.
+                self.assertEqual(bundle["metadata"]["axis"], axis_name)  # Bundle metadata should record the correct axis.
+                self.assertEqual(bundle["metadata"]["window_size"], 3)  # Bundle metadata should preserve the chosen window size.
         finally:
-            shutil.rmtree(temp_path, ignore_errors=True)
+            shutil.rmtree(temp_path, ignore_errors=True)  # Best-effort cleanup of all temporary artifacts.
 
 
-if __name__ == "__main__":
-    unittest.main()
+if __name__ == "__main__":  # Allow running this file directly for local debugging.
+    unittest.main()  # Execute the tests.
