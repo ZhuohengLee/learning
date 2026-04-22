@@ -56,6 +56,75 @@ final_command = base_controller_command + neural_residual
 7. 真正的 `j/k` 浮力直控帧不需要专门采，代码会自动过滤这类直控样本。
 8. 如果某个轴没有打印显式 residual 列，也必须至少打印这个轴的 `base` 和 `total`，这样训练代码才能用 `total - base` 自动恢复 residual target。
 
+## 采数同事的实现顺序
+
+推荐把一行日志定义为“同一个控制周期结束时的完整快照”，按下面顺序实现：
+
+1. 周期开始先记录 `timestamp_ms`，并用它和上一周期时间差得到 `dt_ms`。
+2. 读取本周期传感器原始值，并更新 `depth_valid`、`imu_valid`、`battery_v`、距离传感器状态。
+3. 用滤波器或状态估计器得到 `filtered_depth_cm`、`depth_speed_cm_s`、`depth_accel_cm_s2`、`roll_deg`、`pitch_deg`、`gyro_*_deg_s`。
+4. 读取当前任务和模式，得到 `robot_mode`、`control_mode`、`target_depth_cm`、`forward_phase_interval_ms`。
+5. 在控制器里显式计算内部控制量：
+   `depth_err_cm = target_depth_cm - filtered_depth_cm`
+6. 计算三个轴的基线输出、残差输出、最终输出：
+   `u_base / u_residual / u_total`
+   `forward_cmd_base / forward_cmd_residual / forward_cmd_total`
+   `yaw_cmd_base / yaw_cmd_residual / yaw_cmd_total`
+7. 把最终输出映射成真正下发到执行器的方向、PWM 和开关状态，得到
+   `buoyancy_dir_applied`、`buoyancy_pwm_applied`、`actuator_mask`
+8. 最后再把这一整行一次性写入 CSV。训练会把空字符串当成缺失值，所以训练相关列不要留空。
+
+## 每个字段怎么得到
+
+下面这张表是给实现采数的人看的，重点是说明“这个字段应该从哪里来”。
+
+| 字段 | 怎么得到 | 备注 |
+| --- | --- | --- |
+| `session_id` | 当前一次开机或一次采样任务的固定会话 ID | 推荐直接用 SD 目录名或启动时间戳 |
+| `timestamp_ms` | `millis()` 或单调递增系统时钟 | 必须单调递增 |
+| `dt_ms` | `timestamp_ms - previous_timestamp_ms` | 第一帧可以写 `0` |
+| `robot_mode` | 主状态机当前模式 | 例如 idle / auto / manual 的编码值 |
+| `control_mode` | 控制输入来源 | 用来区分任务控制和直控 |
+| `depth_valid` | 深度传感器健康标志 | 无效帧训练时会过滤 |
+| `imu_valid` | IMU 健康标志 | 无效帧训练时会过滤 |
+| `battery_v` | 电池 ADC 读数换算成电压 | 不要一直写 `0.00` |
+| `target_depth_cm` | 当前深度控制器内部实际使用的目标深度 | 不要留空；没有目标就写当前保持深度 |
+| `filtered_depth_cm` | 深度传感器原始值经过滤波后的结果 | 推荐记录控制器真正用到的值 |
+| `depth_speed_cm_s` | 深度的一阶差分或状态估计器输出 | 单位固定为 cm/s |
+| `depth_accel_cm_s2` | 深度速度的一阶差分或状态估计器输出 | 单位固定为 cm/s^2 |
+| `roll_deg` / `pitch_deg` | IMU 姿态解算结果 | 用控制器实际使用的姿态值 |
+| `gyro_x_deg_s` / `gyro_y_deg_s` / `gyro_z_deg_s` | IMU 陀螺仪角速度读数 | 单位固定为 deg/s |
+| `front_distance_cm` / `left_distance_cm` / `right_distance_cm` | 距离传感器测距值，统一换算到 cm | 如果当前没有这些传感器，不要留空；临时可写 `0`，但训练时必须同步把这些列从 `--feature-columns` 里删掉 |
+| `depth_err_cm` | `target_depth_cm - filtered_depth_cm` | 这是训练默认深度模型的重要输入 |
+| `u_base` | 手写深度基线控制器输出 | 不是传感器量，是控制器内部变量 |
+| `u_residual` | 神经网络残差输出 | 神经网络未接入前固定写 `0` |
+| `u_total` | `u_base + u_residual` 再经过限幅后的结果 | 这是最终深度控制指令 |
+| `forward_cmd_base` | 手写前进控制器输出 | 不是传感器量，是控制器内部变量 |
+| `forward_cmd_residual` | 神经网络前进残差输出 | 神经网络未接入前固定写 `0` |
+| `forward_cmd_total` | `forward_cmd_base + forward_cmd_residual` | 最终前进控制指令 |
+| `forward_phase_interval_ms` | 当前推进周期设置值 | 前进和转向模型都会用到 |
+| `yaw_cmd_base` | 手写转向控制器输出 | 不是传感器量，是控制器内部变量 |
+| `yaw_cmd_residual` | 神经网络转向残差输出 | 神经网络未接入前固定写 `0` |
+| `yaw_cmd_total` | `yaw_cmd_base + yaw_cmd_residual` | 最终转向控制指令 |
+| `buoyancy_dir_applied` | 根据 `u_total` 实际下发的浮力方向 | 记录最终真正执行的方向 |
+| `buoyancy_pwm_applied` | 根据 `u_total` 实际下发的 PWM | 记录最终真正执行的 PWM |
+| `actuator_mask` | 本周期实际打开了哪些执行器的 bitmask | 用最终执行状态，不是目标状态 |
+| `balancing` | 是否处于 balance / trim 特殊模式 | 该模式下样本会被过滤 |
+| `emergency_stop` | 是否处于急停 | 急停帧会被过滤 |
+
+## 神经网络还没接上时怎么写
+
+如果目前板端还没有神经网络推理，先按下面方式记录，这也是合法训练数据：
+
+- `u_residual = 0`
+- `u_total = u_base`
+- `forward_cmd_residual = 0`
+- `forward_cmd_total = forward_cmd_base`
+- `yaw_cmd_residual = 0`
+- `yaw_cmd_total = yaw_cmd_base`
+
+换句话说，第一阶段最重要的不是“已经有残差”，而是先把基线控制器内部量打印出来。
+
 ## 正式 CSV 表头
 
 当前推荐固定使用下面这一组列，并按这个顺序输出：
