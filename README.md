@@ -102,8 +102,7 @@ emergency_stop
 - `imu_valid=0` 鐨勫抚浼氳涓㈡帀
 - `balancing=1` 鐨勫抚浼氳涓㈡帀
 - `emergency_stop=1` 鐨勫抚浼氳涓㈡帀
-- 娣卞害杞磋缁冧粛鐒跺彧淇濈暀 `control_mode=1` 鎴?`auto` 鐨勯棴鐜抚
-- 鍓嶈繘 / 杞悜杞磋缁冨厑璁?`control_mode=0` 鎴?`manual` 鐨勪换鍔″抚
+- `L50` 杩欑被楂樺眰鐩爣鍛戒护浜х敓鐨勯棴鐜墽琛屽抚浼氳淇濈暀锛屼笉鍐嶅洜涓?`control_mode=0` 鎴?`manual` 鑰屼涪鎺?- 鍓嶈繘 / 杞悜杞翠换鍔″抚鍚屾牱浼氳淇濈暀
 - 鍙湁鐪熸鐨?`j/k` 娴姏鐩存帶甯т細琚涪鎺夛細
   `buoyancy_dir_applied in {1,2}` 涓?`buoyancy_pwm_applied` 鎺ヨ繎 `255`锛?  鍚屾椂 `u_base=0`銆乣u_residual=0`銆乣|u_total|=100`
 - 鏃堕棿鎴冲€掗€€鎴栫浉閭诲抚鏃堕棿宸繃澶ф椂锛屼細琚垏鎴愪笉鍚屽簭鍒?

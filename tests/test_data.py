@@ -304,6 +304,79 @@ class DataPipelineTests(unittest.TestCase):  # Group data-pipeline tests togethe
         finally:
             csv_path.unlink(missing_ok=True)  # Delete the temporary CSV regardless of test outcome.
 
+    def test_build_examples_keeps_manual_depth_target_frames_for_depth_training(self) -> None:
+        """Verify that manual `L50`-style depth-target frames remain trainable."""
+
+        tests_dir = Path(__file__).resolve().parent  # Place the temporary file near the test folder.
+        with tempfile.NamedTemporaryFile(
+            mode="w",  # Open the file in text-write mode.
+            newline="",  # Let the CSV writer manage newline handling.
+            encoding="utf-8",  # Use UTF-8 for deterministic text output.
+            suffix=".csv",  # Give the temporary file a CSV suffix.
+            dir=tests_dir,  # Keep the file inside the test directory.
+            delete=False,  # Keep the file after close so the loader can reopen it.
+        ) as handle:
+            csv_path = Path(handle.name)  # Capture the generated temporary file path.
+            writer = csv.DictWriter(
+                handle,  # Write rows into the open temporary file.
+                fieldnames=[
+                    "session_id",  # Session id used by the splitter.
+                    "timestamp_ms",  # Frame timestamp in milliseconds.
+                    "dt_ms",  # Delta time between frames.
+                    "control_mode",  # Autonomous/manual control flag.
+                    "depth_valid",  # Depth sensor validity flag.
+                    "imu_valid",  # IMU validity flag.
+                    "balancing",  # Balance-mode flag.
+                    "emergency_stop",  # Emergency-stop flag.
+                    "buoyancy_dir_applied",  # Applied buoyancy direction for direct-manual filtering.
+                    "u_residual",  # Explicit depth residual target.
+                    *DEFAULT_FEATURE_COLUMNS,  # Default depth-training input features.
+                    "u_base",  # Base control output.
+                    "u_total",  # Total control output after residual trim.
+                ],
+            )  # Build a CSV writer with the minimal required fields.
+            writer.writeheader()  # Emit the CSV header row.
+            for index in range(DEFAULT_WINDOW_SIZE):  # Write exactly one full window of valid rows.
+                writer.writerow(
+                    {
+                        "session_id": "L",  # Keep all rows in one synthetic session.
+                        "timestamp_ms": index * 50,  # Space frames 50 ms apart.
+                        "dt_ms": 50,  # Record the frame delta in milliseconds.
+                        "control_mode": 0,  # Mark the row as manual to match `L50` issued in manual mode.
+                        "depth_valid": 1,  # Mark depth as valid.
+                        "imu_valid": 1,  # Mark IMU as valid.
+                        "balancing": 0,  # Keep the row outside balance mode.
+                        "emergency_stop": 0,  # Keep the row outside emergency-stop mode.
+                        "buoyancy_dir_applied": 2,  # Depth controller is actively descending toward the target.
+                        "u_residual": 5.0,  # Residual target stays explicit for this synthetic case.
+                        "depth_err_cm": 10.0 - index,  # Vary the depth error across the approach to the target.
+                        "depth_speed_cm_s": -0.2,  # Keep depth speed constant for simplicity.
+                        "depth_accel_cm_s2": 0.03,  # Keep depth acceleration constant for simplicity.
+                        "roll_deg": 0.1,  # Keep roll constant for simplicity.
+                        "pitch_deg": -0.1,  # Keep pitch constant for simplicity.
+                        "gyro_x_deg_s": 0.01,  # Keep gyro-x constant for simplicity.
+                        "gyro_y_deg_s": 0.02,  # Keep gyro-y constant for simplicity.
+                        "gyro_z_deg_s": 0.03,  # Keep gyro-z constant for simplicity.
+                        "battery_v": 11.8,  # Keep battery voltage constant for simplicity.
+                        "buoyancy_pwm_applied": 140,  # Closed-loop depth control is active but not in `j/k` full-manual mode.
+                        "u_base": 90.0,  # Base controller contributes the dominant effort.
+                        "u_total": 95.0,  # Total command equals base plus residual trim.
+                    }
+                )  # Write one synthetic telemetry row.
+
+        try:  # Ensure the temporary file is cleaned up even if assertions fail.
+            rows = load_control_rows(csv_path)  # Reload the synthetic CSV through the normal loader.
+            examples = build_examples(
+                rows,  # Pass the synthetic telemetry rows.
+                DEFAULT_FEATURE_COLUMNS,  # Use the default depth feature set.
+                window_size=DEFAULT_WINDOW_SIZE,  # Build exactly one full-size window.
+                target_column="u_residual",  # Request the depth residual target explicitly.
+            )  # Let the pipeline keep manual target-hold depth frames.
+            self.assertEqual(len(examples.examples), 1)  # Manual `L50`-style frames should remain trainable.
+            self.assertEqual(examples.examples[0].target, 5.0)  # The explicit residual target should survive unchanged.
+        finally:
+            csv_path.unlink(missing_ok=True)  # Delete the temporary CSV regardless of test outcome.
+
     def test_build_examples_filters_direct_manual_buoyancy_override_frames(self) -> None:
         """Verify that only the explicit `j/k` buoyancy override signature is rejected."""
 

@@ -320,7 +320,7 @@ def _row_is_trainable(
     feature_columns: Sequence[str],
     target_column: str | None,
 ) -> bool:
-    """Return True only for sensor-valid control frames that match the target regime."""
+    """Return True only for sensor-valid control frames that match the training contract."""
 
     if row.get("depth_valid") and not _read_flag(row, "depth_valid"):  # Drop rows with invalid depth sensing.
         return False  # Depth-dependent control cannot learn from these rows.
@@ -334,10 +334,6 @@ def _row_is_trainable(
     if _row_is_direct_buoyancy_override(row):  # Reject only the explicit `j/k` buoyancy override regime.
         return False  # Direct ascend/descend commands bypass the controller and should not be imitated.
 
-    control_mode = _normalized_control_mode(row)  # Normalize the control mode field when present.
-    if _target_requires_autonomous_depth_control(target_column) and control_mode and control_mode not in {"1", "auto"}:
-        return False  # Depth residual training still requires autonomous closed-loop control frames.
-
     try:  # Validate numeric feature and target availability using the same helper path as training.
         for column in feature_columns:  # Check every requested feature column.
             _read_float(row, column)  # Fail if any feature is missing or malformed.
@@ -345,13 +341,7 @@ def _row_is_trainable(
     except ValueError:  # Catch any missing or malformed field error.
         return False  # Reject rows that cannot become valid training examples.
 
-    return True  # The row belongs to the requested trainable control regime.
-
-
-def _target_requires_autonomous_depth_control(target_column: str | None) -> bool:
-    """Return True when the requested target belongs to the depth-control axis."""
-
-    return target_column in {None, "", "residual_target_pwm", "u_residual"}  # Treat auto-target mode as depth training.
+    return True  # The row belongs to the training contract after safety filtering.
 
 
 def _normalized_control_mode(row: dict[str, str]) -> str:
