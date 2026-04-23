@@ -1,10 +1,10 @@
-"""Export PyTorch residual bundles into ONNX and optionally into `.espdl`.
+"""Export one joint residual bundle into ONNX and optionally into `.espdl`.
 
 Reading route:
-1. Start with `export_model()` because it is the public single-axis export entry.
-2. Then read `prepare_calibration_inputs()` to see how calibration data is built from CSV.
-3. Then read `export_espdl_from_onnx()` to see how ESP-PPQ is invoked.
-4. Finally read the small validation helpers at the bottom.
+1. Start with `main()` for CLI wiring.
+2. Then read `export_model()` because it is the public joint-export entry.
+3. Then read `prepare_calibration_inputs()` to see how calibration data is rebuilt from CSV.
+4. Finally read `export_espdl_from_onnx()` to see how ESP-PPQ is invoked.
 """
 
 from __future__ import annotations  # Defer type-hint evaluation for cleaner forward references.
@@ -23,51 +23,27 @@ if __package__ in {None, ""}:  # Detect direct script execution outside package 
 
 from learning.data import (  # Reuse the shared telemetry contract for calibration-data preparation.
     Standardizer,  # Rebuild input normalization from the saved training bundle.
-    build_examples,  # Convert calibration CSV rows into windowed feature vectors.
+    build_multi_axis_examples,  # Convert calibration CSV rows into windowed joint feature vectors.
     load_control_rows,  # Load calibration telemetry from the shared CSV format.
 )
-from learning.model import TorchResidualMLP, require_torch  # Import the PyTorch backend and dependency guard.
+from learning.model import TorchJointResidualMLP, require_torch  # Import the joint PyTorch backend and dependency guard.
 
 
-AXIS_EXPORTS = {
-    "depth": "depth_model.onnx",  # Default ONNX output for the depth model.
-    "forward": "forward_model.onnx",  # Default ONNX output for the forward model.
-    "yaw": "yaw_model.onnx",  # Default ONNX output for the yaw model.
-}  # Map each logical control axis to its default ONNX filename.
 SUPPORTED_ESPDL_TARGETS = ("esp32", "esp32s3", "esp32p4")  # Keep the supported ESP-DL deployment targets explicit.
 
 
 def main() -> None:
-    """CLI entry point for exporting one or three PyTorch bundles into ONNX / `.espdl` artifacts."""
+    """CLI entry point for exporting one joint PyTorch bundle into ONNX / `.espdl` artifacts."""
 
     require_torch()  # Fail early with a clear message when PyTorch is unavailable.
     _require_onnx()  # ONNX export is always the first stage of the pipeline.
     args = parse_args()  # Parse all user-supplied export options.
-
-    calibration_csv = Path(args.calibration_csv) if args.calibration_csv else None  # Normalize the optional calibration CSV path.
-    if args.model_dir:  # Run batch export when the caller supplied a three-axis bundle directory.
-        export_axis_models(
-            model_dir=Path(args.model_dir),  # Read the three `.pt` bundles from this directory.
-            output_dir=Path(args.output_dir),  # Write ONNX exports into this directory.
-            opset=args.opset,  # Use the configured ONNX opset.
-            espdl_output_dir=Path(args.espdl_output_dir) if args.espdl_output_dir else None,  # Optionally write `.espdl` files here.
-            calibration_csv=calibration_csv,  # Use this telemetry CSV for post-training quantization.
-            calib_steps=args.calib_steps,  # Use at most this many calibration samples per axis.
-            max_dt_ms=args.max_dt_ms,  # Reuse the same sequence-gap threshold used during training.
-            target=args.target,  # Quantize for this ESP-DL target platform.
-            num_of_bits=args.num_of_bits,  # Use this quantization precision.
-            device_name=args.device,  # Run ESP-PPQ on this torch device.
-            export_test_values=args.export_test_values,  # Optionally embed a deterministic board-side test vector.
-            verbose=args.verbose,  # Forward the requested ESP-PPQ verbosity level.
-        )
-        return  # Batch export is complete.
-
     export_model(
-        model_path=Path(args.model),  # Read the single `.pt` bundle from this path.
+        model_path=Path(args.model),  # Read the joint `.pt` bundle from this path.
         output_path=Path(args.output),  # Write the ONNX export to this path.
         opset=args.opset,  # Use the configured ONNX opset.
         espdl_path=Path(args.espdl_output) if args.espdl_output else None,  # Optionally continue into `.espdl`.
-        calibration_csv=calibration_csv,  # Use this telemetry CSV for post-training quantization.
+        calibration_csv=Path(args.calibration_csv) if args.calibration_csv else None,  # Use this telemetry CSV for post-training quantization.
         calib_steps=args.calib_steps,  # Use at most this many calibration samples.
         max_dt_ms=args.max_dt_ms,  # Reuse the same sequence-gap threshold used during training.
         target=args.target,  # Quantize for this ESP-DL target platform.
@@ -79,23 +55,20 @@ def main() -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    """Define and parse command-line arguments for PyTorch ONNX / ESP-DL export."""
+    """Define and parse command-line arguments for joint PyTorch ONNX / ESP-DL export."""
 
     parser = argparse.ArgumentParser(
         description=(
-            "Export one PyTorch residual model bundle or a depth/forward/yaw model directory into ONNX files, "
-            "and optionally continue into ESP-PPQ `.espdl` deployment artifacts."
+            "Export one shared-trunk PyTorch residual model bundle into one ONNX file, "
+            "and optionally continue into one ESP-PPQ `.espdl` deployment artifact."
         ),
     )
-    parser.add_argument("--model", help="Path to a single residual model bundle `.pt` file")
-    parser.add_argument("--output", help="Path to the generated `.onnx` file for single-bundle export")
-    parser.add_argument("--model-dir", help="Directory containing depth/forward/yaw `.pt` bundles")
-    parser.add_argument("--output-dir", help="Directory that will receive the generated ONNX files")
-    parser.add_argument("--opset", type=int, default=18, help="ONNX opset version used for export")
-    parser.add_argument("--espdl-output", help="Optional `.espdl` output path for single-bundle export")
-    parser.add_argument("--espdl-output-dir", help="Optional directory that will receive batch `.espdl` files")
+    parser.add_argument("--model", required=True, help="Path to the joint residual model bundle `.pt` file")
+    parser.add_argument("--output", required=True, help="Path to the generated joint `.onnx` file")
+    parser.add_argument("--opset", type=int, default=13, help="ONNX opset version used for export")
+    parser.add_argument("--espdl-output", help="Optional `.espdl` output path")
     parser.add_argument("--calibration-csv", help="Telemetry CSV used to build ESP-PPQ calibration inputs")
-    parser.add_argument("--calib-steps", type=int, default=32, help="Maximum number of calibration samples per axis")
+    parser.add_argument("--calib-steps", type=int, default=32, help="Maximum number of calibration samples")
     parser.add_argument("--max-dt-ms", type=float, default=80.0, help="Maximum allowed timestamp gap when rebuilding windows")
     parser.add_argument(
         "--target",
@@ -111,36 +84,20 @@ def parse_args() -> argparse.Namespace:
         help="Embed one deterministic test input/output pair into the exported `.espdl` model for board-side verification.",
     )
     parser.add_argument("--verbose", type=int, default=1, help="Verbosity level forwarded to ESP-PPQ")
-    args = parser.parse_args()
+    args = parser.parse_args()  # Parse the full CLI once.
 
-    single_mode = bool(args.model)  # Detect single-bundle export mode.
-    batch_mode = bool(args.model_dir)  # Detect three-axis directory export mode.
-    if single_mode == batch_mode:  # Require exactly one of the two export modes.
-        parser.error("choose either --model for single-bundle export or --model-dir for batch export")
-    if single_mode and not args.output:  # Require the ONNX output path in single mode.
-        parser.error("--output is required when using --model")
-    if batch_mode and not args.output_dir:  # Require the ONNX output directory in batch mode.
-        parser.error("--output-dir is required when using --model-dir")
-    if args.output and not single_mode:  # Reject single-mode-only options in batch mode.
-        parser.error("--output can only be used with --model")
-    if args.output_dir and not batch_mode:  # Reject batch-mode-only options in single mode.
-        parser.error("--output-dir can only be used with --model-dir")
-    if args.espdl_output and not single_mode:  # Reject single-mode-only `.espdl` paths in batch mode.
-        parser.error("--espdl-output can only be used with --model")
-    if args.espdl_output_dir and not batch_mode:  # Reject batch-mode-only `.espdl` paths in single mode.
-        parser.error("--espdl-output-dir can only be used with --model-dir")
-    if (args.espdl_output or args.espdl_output_dir) and not args.calibration_csv:  # Enforce representative calibration data for PTQ.
-        parser.error("--calibration-csv is required when exporting `.espdl` artifacts")
+    if args.espdl_output and not args.calibration_csv:  # Enforce representative calibration data for PTQ.
+        parser.error("--calibration-csv is required when exporting `.espdl` artifacts")  # Explain the PTQ dependency clearly.
     if args.calib_steps < 1:  # Reject invalid calibration sample limits.
-        parser.error("--calib-steps must be positive")
-    return args
+        parser.error("--calib-steps must be positive")  # Explain the lower bound clearly.
+    return args  # Return the validated CLI arguments.
 
 
 def export_model(
     *,
     model_path: Path,
     output_path: Path,
-    opset: int = 18,
+    opset: int = 13,
     espdl_path: Path | None = None,
     calibration_csv: Path | None = None,
     calib_steps: int = 32,
@@ -151,25 +108,26 @@ def export_model(
     export_test_values: bool = False,
     verbose: int = 1,
 ) -> dict[str, object]:
-    """Export one `.pt` residual bundle into ONNX and optionally into `.espdl` artifacts."""
+    """Export one joint `.pt` residual bundle into ONNX and optionally into `.espdl` artifacts."""
 
     require_torch()  # Fail early with a clear message when PyTorch is unavailable.
     _require_onnx()  # ONNX export dependencies are required for the first stage.
     import torch  # type: ignore[import-not-found]
 
-    bundle = torch.load(model_path, map_location="cpu")  # Load the saved PyTorch bundle from disk.
+    bundle = torch.load(model_path, map_location="cpu")  # Load the saved joint PyTorch bundle from disk.
     model = _restore_model_from_bundle(bundle)  # Recreate the `nn.Module` with trained weights.
-    dummy_input = torch.zeros(1, int(bundle["model_spec"]["input_dim"]), dtype=torch.float32)  # Match the fixed batch-1 ESP-DL input contract.
+    input_dim = _require_positive_int(bundle["model_spec"]["input_dim"], field_name="model_spec.input_dim")  # Recover the fixed flat input width from the bundle.
     output_path.parent.mkdir(parents=True, exist_ok=True)  # Create the ONNX output directory before export.
+    dummy_input = torch.zeros(1, input_dim, dtype=torch.float32)  # Match the fixed batch-1 ESP-DL input contract.
     with contextlib.redirect_stdout(io.StringIO()):  # Suppress torch.onnx Unicode-rich progress logs that break on GBK consoles.
         torch.onnx.export(
-            model,
-            dummy_input,
-            output_path,
-            input_names=["input"],
-            output_names=["residual"],
-            opset_version=opset,
-            do_constant_folding=True,
+            model,  # Export the restored joint PyTorch module.
+            dummy_input,  # Trace the network with one fixed-size batch-1 input.
+            output_path,  # Write the ONNX graph here.
+            input_names=["input"],  # Keep the single input name stable for firmware integration.
+            output_names=["residuals"],  # Emit one `[batch, 3]` residual tensor ordered by `axis_names`.
+            opset_version=opset,  # Use the requested ONNX opset version.
+            do_constant_folding=True,  # Fold constants during export for a simpler graph.
         )
 
     metadata = _bundle_metadata(bundle, model_path=model_path, onnx_path=output_path)  # Build the JSON-safe ONNX metadata payload.
@@ -186,10 +144,10 @@ def export_model(
         "opset": opset,  # Record the ONNX opset used for export.
     }
     if espdl_path is None:  # Stop after ONNX export when the caller did not request ESP-PPQ.
-        return result
+        return result  # Return only the ONNX artifact information.
 
     if calibration_csv is None:  # Guard against callers that bypassed CLI validation.
-        raise ValueError("calibration_csv is required when exporting `.espdl` artifacts")
+        raise ValueError("calibration_csv is required when exporting `.espdl` artifacts")  # Explain the PTQ dependency clearly.
 
     calibration = prepare_calibration_inputs(
         bundle=bundle,  # Use the saved feature contract and standardizer from the bundle.
@@ -219,7 +177,8 @@ def export_model(
                 "calibration_samples": calibration["sample_count"],  # Record how many representative samples were used.
                 "window_size": calibration["window_size"],  # Record the stacked-frame window size used for calibration.
                 "feature_columns": calibration["feature_columns"],  # Record the base feature contract used during calibration.
-                "target_column": calibration["target_column"],  # Record which residual target defined trainable windows.
+                "axis_names": calibration["axis_names"],  # Record the joint output order used for calibration and firmware parsing.
+                "target_columns": calibration["target_columns"],  # Record the logical-axis to CSV-target mapping.
                 "requested_target": target,  # Preserve the user-facing chip target.
                 "esp_ppq_target": espdl_result["esp_ppq_target"],  # Preserve the quantizer target actually passed to ESP-PPQ.
                 "num_of_bits": num_of_bits,  # Preserve the quantization precision.
@@ -248,67 +207,7 @@ def export_model(
             "espdl_calibration_samples": calibration["sample_count"],  # Record the number of calibration windows used.
         }
     )
-    return result
-
-
-def export_axis_models(
-    *,
-    model_dir: Path,
-    output_dir: Path,
-    opset: int = 18,
-    espdl_output_dir: Path | None = None,
-    calibration_csv: Path | None = None,
-    calib_steps: int = 32,
-    max_dt_ms: float = 80.0,
-    target: str = "esp32s3",
-    num_of_bits: int = 8,
-    device_name: str = "cpu",
-    export_test_values: bool = False,
-    verbose: int = 1,
-) -> dict[str, object]:
-    """Export every expected axis bundle into matching ONNX files and optional `.espdl` artifacts."""
-
-    output_dir.mkdir(parents=True, exist_ok=True)  # Create the ONNX output directory before export starts.
-    if espdl_output_dir is not None:  # Prepare the optional `.espdl` output directory when requested.
-        espdl_output_dir.mkdir(parents=True, exist_ok=True)
-
-    manifest: dict[str, object] = {
-        "backend": "pytorch",  # Record the backend used to create these exports.
-        "opset": opset,  # Record the ONNX opset used for the intermediate files.
-        "espdl_target": target if espdl_output_dir is not None else None,  # Record the requested deployment target when applicable.
-        "espdl_num_of_bits": num_of_bits if espdl_output_dir is not None else None,  # Record the requested quantization precision when applicable.
-        "axes": {},  # Populate per-axis export information below.
-    }
-    for axis_name, filename in AXIS_EXPORTS.items():  # Walk the expected three public control axes.
-        bundle_path = model_dir / f"{axis_name}_model.pt"  # Resolve the expected `.pt` bundle path.
-        if not bundle_path.is_file():  # Reject missing axis bundles immediately.
-            raise FileNotFoundError(f"missing axis model bundle: {bundle_path}")
-
-        output_path = output_dir / filename  # Place the ONNX file in the requested output directory.
-        axis_result = export_model(
-            model_path=bundle_path,  # Export this axis bundle.
-            output_path=output_path,  # Write the ONNX file here.
-            opset=opset,  # Use the requested ONNX opset.
-            espdl_path=(espdl_output_dir / f"{axis_name}_model.espdl") if espdl_output_dir is not None else None,  # Optionally continue into `.espdl`.
-            calibration_csv=calibration_csv,  # Use this telemetry CSV for PTQ when requested.
-            calib_steps=calib_steps,  # Use at most this many calibration windows.
-            max_dt_ms=max_dt_ms,  # Reuse the requested sequence-gap threshold.
-            target=target,  # Quantize for this ESP-DL target when requested.
-            num_of_bits=num_of_bits,  # Use this quantization precision when requested.
-            device_name=device_name,  # Run quantization on this torch device when requested.
-            export_test_values=export_test_values,  # Optionally embed board-side test values when requested.
-            verbose=verbose,  # Forward the requested ESP-PPQ verbosity level.
-        )
-        manifest["axes"][axis_name] = axis_result  # type: ignore[index]
-
-    manifest_path = output_dir / "axis_manifest.json"  # Keep the main manifest next to the ONNX exports.
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")  # Save the ONNX/ESPDL combined manifest.
-    print(f"saved ONNX export manifest to {manifest_path}")  # Tell the user where the main manifest was written.
-    if espdl_output_dir is not None:  # Mirror a manifest into the `.espdl` directory when requested.
-        espdl_manifest_path = espdl_output_dir / "espdl_axis_manifest.json"  # Name the ESP-DL-side manifest explicitly.
-        espdl_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")  # Save the mirrored manifest.
-        print(f"saved ESP-DL export manifest to {espdl_manifest_path}")  # Tell the user where the mirrored manifest was written.
-    return manifest
+    return result  # Return the full export summary.
 
 
 def prepare_calibration_inputs(
@@ -321,24 +220,27 @@ def prepare_calibration_inputs(
     """Build normalized representative calibration inputs from the shared telemetry CSV contract."""
 
     if limit < 1:  # Reject invalid calibration sample limits.
-        raise ValueError("limit must be positive")
+        raise ValueError("limit must be positive")  # Explain the lower bound clearly.
 
     metadata = _require_mapping(bundle.get("metadata"), field_name="metadata")  # Recover the saved feature contract from the bundle.
     feature_columns = _require_string_list(metadata.get("feature_columns"), field_name="metadata.feature_columns")  # Recover the base feature list.
     window_size = _require_positive_int(metadata.get("window_size"), field_name="metadata.window_size")  # Recover the stacked-frame window size.
-    target_column = str(metadata.get("target_column", "")).strip() or None  # Recover the axis-specific target used to define trainable windows.
+    axis_names = _require_string_list(metadata.get("axis_names"), field_name="metadata.axis_names")  # Recover the joint output order.
+    target_columns = _require_string_mapping(metadata.get("target_columns"), field_name="metadata.target_columns")  # Recover the logical-axis to CSV-target mapping.
     input_standardizer = _standardizer_from_payload(bundle.get("input_standardizer"))  # Recover the saved input normalization statistics.
 
     rows = load_control_rows(calibration_csv)  # Load the representative telemetry CSV from disk.
-    dataset = build_examples(
+    dataset = build_multi_axis_examples(
         rows,  # Rebuild windows from the shared telemetry contract.
         feature_columns,  # Use the same base feature columns used during training.
+        axis_targets=target_columns,  # Require the same joint target contract used during training.
         window_size=window_size,  # Use the same stacked-frame width used during training.
-        target_column=target_column,  # Reuse the same axis-specific trainable-row filter.
         max_dt_ms=max_dt_ms,  # Split sequences with the requested timestamp-gap threshold.
     )
     if not dataset.examples:  # Reject calibration files that do not yield any trainable windows.
-        raise ValueError(f"no trainable calibration examples were built from {calibration_csv}")
+        raise ValueError(f"no trainable calibration examples were built from {calibration_csv}")  # Explain the failure clearly.
+    if dataset.axis_names != axis_names:  # Detect bundle/CSV mismatches early.
+        raise ValueError("calibration axis order does not match the saved model metadata")  # Explain the mismatch clearly.
 
     selected_examples = _select_evenly_spaced_examples(dataset.examples, limit)  # Spread calibration picks across the whole log instead of taking only the earliest rows.
     normalized_samples = [
@@ -351,7 +253,8 @@ def prepare_calibration_inputs(
         "input_dim": len(normalized_samples[0]),  # Record the flat feature width expected by the model.
         "window_size": window_size,  # Record the stacked-frame width used to rebuild windows.
         "feature_columns": feature_columns,  # Record the base feature contract used to rebuild windows.
-        "target_column": target_column,  # Record the axis-specific residual target used to define trainable rows.
+        "axis_names": axis_names,  # Record the stable joint output order.
+        "target_columns": target_columns,  # Record the logical-axis to CSV-target mapping.
         "samples": normalized_samples,  # Return the normalized calibration vectors ready for ESP-PPQ.
         "timestamps_ms": [example.timestamp_ms for example in selected_examples],  # Record which frames were picked for traceability.
         "session_ids": [example.session_id for example in selected_examples],  # Record which sessions supplied the calibration windows.
@@ -379,13 +282,13 @@ def export_espdl_from_onnx(
     from torch.utils.data import DataLoader  # type: ignore[import-not-found]
 
     if not calibration_samples:  # Reject quantization requests without representative calibration inputs.
-        raise ValueError("calibration_samples must not be empty")
+        raise ValueError("calibration_samples must not be empty")  # Explain the lower bound clearly.
 
     input_dim = len(calibration_samples[0])  # Infer the flat feature width from the first representative sample.
     if input_dim < 1:  # Reject degenerate empty feature vectors.
-        raise ValueError("calibration samples must have a positive feature dimension")
+        raise ValueError("calibration samples must have a positive feature dimension")  # Explain the lower bound clearly.
     if any(len(sample) != input_dim for sample in calibration_samples):  # Enforce a consistent flat feature width across all samples.
-        raise ValueError("all calibration samples must have the same feature width")
+        raise ValueError("all calibration samples must have the same feature width")  # Explain the shape contract clearly.
 
     espdl_path.parent.mkdir(parents=True, exist_ok=True)  # Create the `.espdl` output directory before quantization starts.
     quant_setting = QuantizationSettingFactory.espdl_setting()  # Use ESP-DL-compatible default PTQ settings.
@@ -442,37 +345,33 @@ def export_espdl_from_onnx(
 
 
 def _restore_model_from_bundle(bundle: dict[str, object]):
-    """Restore a `TorchResidualMLP` from one saved `.pt` bundle."""
+    """Restore a `TorchJointResidualMLP` from one saved `.pt` bundle."""
 
     require_torch()  # Fail early with a clear message when PyTorch is unavailable.
-    model_spec = bundle["model_spec"]  # Read the saved architecture specification.
-    if not isinstance(model_spec, dict):  # Reject malformed bundle payloads.
-        raise ValueError("model_spec must be a mapping")
-    model = TorchResidualMLP(
-        input_dim=int(model_spec["input_dim"]),  # Restore the trained flat input width.
-        hidden_dims=tuple(int(value) for value in model_spec["hidden_dims"]),  # Restore the two hidden-layer widths.
+    model_spec = _require_mapping(bundle.get("model_spec"), field_name="model_spec")  # Read the saved architecture specification.
+    axis_names = _require_string_list(model_spec.get("axis_names"), field_name="model_spec.axis_names")  # Recover the saved output order.
+    model = TorchJointResidualMLP(
+        input_dim=_require_positive_int(model_spec.get("input_dim"), field_name="model_spec.input_dim"),  # Restore the trained flat input width.
+        axis_names=axis_names,  # Restore the trained output-head ordering.
+        hidden_dims=[int(value) for value in _require_list(model_spec.get("hidden_dims"), field_name="model_spec.hidden_dims")],  # Restore the two hidden-layer widths.
     )
-    state_dict = bundle["state_dict"]  # Read the saved parameter dictionary.
-    if not isinstance(state_dict, dict):  # Reject malformed bundle payloads.
-        raise ValueError("state_dict must be a mapping")
+    state_dict = _require_mapping(bundle.get("state_dict"), field_name="state_dict")  # Read the saved parameter dictionary.
     model.load_state_dict(state_dict)  # Restore the trained weights into the recreated module.
     model.eval()  # Freeze the model into inference mode before ONNX export.
-    return model
+    return model  # Return the restored inference-ready model.
 
 
 def _bundle_metadata(bundle: dict[str, object], *, model_path: Path, onnx_path: Path) -> dict[str, object]:
     """Extract the JSON-safe metadata needed after ONNX export."""
 
-    metadata = bundle.get("metadata", {})  # Read the saved training metadata payload.
-    if not isinstance(metadata, dict):  # Reject malformed bundle payloads.
-        raise ValueError("metadata must be a mapping")
+    metadata = _require_mapping(bundle.get("metadata"), field_name="metadata")  # Read the saved training metadata payload.
     return {
         "backend": "pytorch",  # Record which backend produced the exported artifact.
         "source_bundle": str(model_path),  # Record which `.pt` bundle produced this ONNX file.
         "onnx_path": str(onnx_path),  # Record the ONNX output path.
         "metadata": metadata,  # Preserve the saved training metadata payload.
         "input_standardizer": bundle.get("input_standardizer", {}),  # Preserve input normalization statistics.
-        "target_standardizer": bundle.get("target_standardizer", {}),  # Preserve target normalization statistics.
+        "target_standardizer": bundle.get("target_standardizer", {}),  # Preserve output normalization statistics.
         "model_spec": bundle.get("model_spec", {}),  # Preserve the trained model architecture summary.
     }
 
@@ -484,7 +383,7 @@ def _standardizer_from_payload(payload: object) -> Standardizer:
     means = _require_float_list(mapping.get("means"), field_name="input_standardizer.means")  # Recover the saved per-column means.
     stds = _require_float_list(mapping.get("stds"), field_name="input_standardizer.stds")  # Recover the saved per-column std values.
     if len(means) != len(stds):  # Reject malformed normalization payloads.
-        raise ValueError("input_standardizer means/stds length mismatch")
+        raise ValueError("input_standardizer means/stds length mismatch")  # Explain the mismatch clearly.
     return Standardizer(means=means, stds=stds)  # Rebuild the immutable standardizer record used by the shared data layer.
 
 
@@ -492,11 +391,11 @@ def _select_evenly_spaced_examples(examples: Sequence[object], limit: int) -> li
     """Select up to `limit` examples spread roughly evenly across the full log."""
 
     if limit < 1:  # Reject invalid selection limits.
-        raise ValueError("limit must be positive")
+        raise ValueError("limit must be positive")  # Explain the lower bound clearly.
     if len(examples) <= limit:  # Keep all examples when the log is already short enough.
-        return list(examples)
+        return list(examples)  # Return every example in chronological order.
     if limit == 1:  # Special-case the degenerate one-sample selection.
-        return [examples[len(examples) // 2]]
+        return [examples[len(examples) // 2]]  # Pick the median example for balance.
 
     last_index = len(examples) - 1  # Compute the final valid example index once.
     indices = sorted(  # Build a deterministic set of representative indices across the full sequence.
@@ -521,24 +420,35 @@ def _require_mapping(payload: object, *, field_name: str) -> dict[str, object]:
     """Validate that `payload` is a JSON-like mapping and return it."""
 
     if not isinstance(payload, dict):  # Reject malformed JSON-like payloads early.
-        raise ValueError(f"{field_name} must be a mapping")
+        raise ValueError(f"{field_name} must be a mapping")  # Explain the type contract clearly.
+    return payload  # Narrow the type after validation.
+
+
+def _require_list(payload: object, *, field_name: str) -> list[object]:
+    """Validate that `payload` is a JSON-like list and return it."""
+
+    if not isinstance(payload, list):  # Reject malformed JSON-like payloads early.
+        raise ValueError(f"{field_name} must be a list")  # Explain the type contract clearly.
     return payload  # Narrow the type after validation.
 
 
 def _require_float_list(payload: object, *, field_name: str) -> list[float]:
     """Validate that `payload` is a list-like collection of floats."""
 
-    if not isinstance(payload, list):  # Reject malformed JSON-like payloads early.
-        raise ValueError(f"{field_name} must be a list")
-    return [float(value) for value in payload]  # Convert every numeric-looking entry into a real float.
+    return [float(value) for value in _require_list(payload, field_name=field_name)]  # Convert every numeric-looking entry into a real float.
 
 
 def _require_string_list(payload: object, *, field_name: str) -> list[str]:
     """Validate that `payload` is a list-like collection of strings."""
 
-    if not isinstance(payload, list):  # Reject malformed JSON-like payloads early.
-        raise ValueError(f"{field_name} must be a list")
-    return [str(value) for value in payload]  # Convert every entry into a plain string.
+    return [str(value) for value in _require_list(payload, field_name=field_name)]  # Convert every entry into a plain string.
+
+
+def _require_string_mapping(payload: object, *, field_name: str) -> dict[str, str]:
+    """Validate that `payload` is a mapping of strings to strings."""
+
+    mapping = _require_mapping(payload, field_name=field_name)  # Validate that the payload is a mapping first.
+    return {str(key): str(value) for key, value in mapping.items()}  # Normalize every key/value into a plain string.
 
 
 def _require_positive_int(payload: object, *, field_name: str) -> int:
@@ -546,19 +456,19 @@ def _require_positive_int(payload: object, *, field_name: str) -> int:
 
     value = int(payload)  # Convert integer-like JSON values into a real Python int.
     if value < 1:  # Reject zero and negative values.
-        raise ValueError(f"{field_name} must be positive")
-    return value
+        raise ValueError(f"{field_name} must be positive")  # Explain the lower bound clearly.
+    return value  # Return the validated positive integer.
 
 
 def _require_onnx() -> None:
     """Raise a clear error when ONNX export dependencies are missing."""
 
     if importlib.util.find_spec("onnx") is None:  # Detect whether the ONNX package is importable.
-        raise ImportError("PyTorch ONNX export requires the `onnx` package. Install it before using learning.export.")
+        raise ImportError("PyTorch ONNX export requires the `onnx` package. Install it before using learning.export.")  # Explain the missing dependency clearly.
     if importlib.util.find_spec("onnxscript") is None:  # Detect whether the Torch ONNX exporter support package is importable.
         raise ImportError(
             "PyTorch ONNX export also requires `onnxscript` with current torch releases. Install it before using learning.export."
-        )
+        )  # Explain the missing dependency clearly.
 
 
 def _require_esp_ppq() -> None:
@@ -567,8 +477,8 @@ def _require_esp_ppq() -> None:
     if importlib.util.find_spec("ppq") is None:  # Detect whether the ESP-PPQ package is importable.
         raise ImportError(
             "ESP-DL export requires `esp-ppq` (import path `ppq`). Install it before requesting `.espdl` export."
-        )
+        )  # Explain the missing dependency clearly.
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":  # Allow running this file directly as a script.
+    main()  # Execute the CLI entry point.

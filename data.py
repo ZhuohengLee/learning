@@ -57,6 +57,11 @@ DEFAULT_UNIFIED_FEATURE_COLUMNS = list(  # One shared feature set used by the pu
         ]
     )
 )
+DEFAULT_JOINT_TARGET_COLUMNS = {
+    "depth": "u_residual",  # Residual depth-control output.
+    "forward": "forward_cmd_residual",  # Residual forward-control output.
+    "yaw": "yaw_cmd_residual",  # Residual yaw-control output.
+}  # Keep the public joint-model target contract in one ordered mapping.
 DEFAULT_TARGET_PRIORITY = ["residual_target_pwm", "u_residual"]  # Try these residual fields in order.
 TARGET_FALLBACK_PAIRS = {
     "residual_target_pwm": ("u_total", "u_base"),  # Recover depth residual when the legacy explicit field is absent.
@@ -84,6 +89,28 @@ class ExampleSet:
     feature_columns: list[str]  # Base feature names before window flattening.
     feature_names: list[str]  # Expanded feature names after window flattening.
     window_size: int  # Number of frames stacked into each example.
+
+
+@dataclass(frozen=True)  # Freeze the record so joint examples are not mutated during training.
+class MultiAxisExample:
+    """One joint training example carrying residual targets for all control axes."""
+
+    session_id: str  # Session label used to keep train/validation splits clean.
+    timestamp_ms: int  # Timestamp of the last frame inside the stacked window.
+    features: list[float]  # Flattened feature vector built from the window.
+    targets: list[float]  # Residual targets ordered by `axis_names` in the parent dataset.
+
+
+@dataclass(frozen=True)  # Freeze the record so dataset metadata stays consistent.
+class MultiAxisExampleSet:
+    """Prepared joint dataset plus feature and axis metadata."""
+
+    examples: list[MultiAxisExample]  # All prepared joint examples in chronological order.
+    feature_columns: list[str]  # Base feature names before window flattening.
+    feature_names: list[str]  # Expanded feature names after window flattening.
+    window_size: int  # Number of frames stacked into each example.
+    axis_names: list[str]  # Output-axis order used by every example target vector.
+    target_columns: dict[str, str]  # Mapping from logical axis name to CSV target column.
 
 
 @dataclass(frozen=True)  # Freeze the record so normalization statistics stay stable.
@@ -177,10 +204,10 @@ def fit_standardizer(samples: Sequence[Sequence[float]]) -> Standardizer:
 
 
 def split_examples_by_session(
-    dataset: ExampleSet,
+    dataset: ExampleSet | MultiAxisExampleSet,
     val_fraction: float = 0.2,
     seed: int = 7,
-) -> tuple[ExampleSet, ExampleSet]:
+) -> tuple[ExampleSet | MultiAxisExampleSet, ExampleSet | MultiAxisExampleSet]:
     """Split examples by session id to reduce train/validation leakage."""
 
     if not dataset.examples:  # Refuse to split an empty dataset.
@@ -188,7 +215,7 @@ def split_examples_by_session(
     if not 0.0 <= val_fraction < 1.0:  # Enforce a sane validation fraction range.
         raise ValueError("val_fraction must be in [0, 1)")  # Explain the accepted interval.
 
-    grouped: dict[str, list[Example]] = {}  # Bucket examples by session id.
+    grouped: dict[str, list[Example | MultiAxisExample]] = {}  # Bucket examples by session id.
     for example in dataset.examples:  # Visit every prepared example once.
         grouped.setdefault(example.session_id, []).append(example)  # Append the example to its session bucket.
 
@@ -212,18 +239,8 @@ def split_examples_by_session(
             example for example in dataset.examples if example.session_id in val_session_ids
         ]  # Build the validation subset from validation sessions.
 
-    train_set = ExampleSet(
-        examples=train_examples,  # Attach the selected training examples.
-        feature_columns=list(dataset.feature_columns),  # Copy base feature-column metadata.
-        feature_names=list(dataset.feature_names),  # Copy expanded feature-name metadata.
-        window_size=dataset.window_size,  # Preserve the original window size.
-    )
-    val_set = ExampleSet(
-        examples=val_examples,  # Attach the selected validation examples.
-        feature_columns=list(dataset.feature_columns),  # Copy base feature-column metadata.
-        feature_names=list(dataset.feature_names),  # Copy expanded feature-name metadata.
-        window_size=dataset.window_size,  # Preserve the original window size.
-    )
+    train_set = _rebuild_example_set(dataset=dataset, examples=train_examples)  # Recreate a train split that preserves dataset metadata.
+    val_set = _rebuild_example_set(dataset=dataset, examples=val_examples)  # Recreate a validation split that preserves dataset metadata.
     return train_set, val_set  # Return both splits together.
 
 
@@ -280,6 +297,73 @@ def build_examples(
     )
 
 
+def build_multi_axis_examples(
+    rows: Sequence[dict[str, str]],
+    feature_columns: Sequence[str],
+    *,
+    axis_targets: dict[str, str] | None = None,
+    window_size: int = DEFAULT_WINDOW_SIZE,
+    max_dt_ms: float = 80.0,
+) -> MultiAxisExampleSet:
+    """Convert raw telemetry rows into fixed-width sliding windows with three-axis targets."""
+
+    if window_size < 1:  # Refuse zero-length or negative windows.
+        raise ValueError("window_size must be at least 1")  # Explain the lower bound.
+    if not feature_columns:  # Refuse a dataset with no input features.
+        raise ValueError("feature_columns must not be empty")  # Explain why preparation failed.
+
+    resolved_axis_targets = {
+        axis_name: str(target_column).strip()  # Normalize each requested target column once.
+        for axis_name, target_column in (axis_targets or DEFAULT_JOINT_TARGET_COLUMNS).items()  # Use the public defaults when the caller did not override them.
+        if str(target_column).strip()  # Ignore blank target-column overrides.
+    }
+    if not resolved_axis_targets:  # Reject a joint builder call that has no outputs left to learn.
+        raise ValueError("axis_targets must contain at least one target column")  # Explain the contract clearly.
+
+    sequences = _split_multi_axis_sequences(
+        rows=rows,  # Pass all raw CSV rows.
+        feature_columns=feature_columns,  # Validate these feature columns inside each row.
+        target_columns=list(resolved_axis_targets.values()),  # Require every requested joint target to be resolvable.
+        max_dt_ms=max_dt_ms,  # Cut sequences when the time gap gets too large.
+    )
+    feature_names = compute_feature_names(feature_columns, window_size)  # Build the flattened feature-name list.
+    axis_names = list(resolved_axis_targets.keys())  # Preserve the caller-specified joint output order.
+    examples: list[MultiAxisExample] = []  # Accumulate prepared joint examples here.
+
+    for sequence in sequences:  # Process each contiguous trainable run separately.
+        if len(sequence) < window_size:  # Skip runs that are too short for one full window.
+            continue  # Nothing can be extracted from this sequence.
+
+        for end_index in range(window_size - 1, len(sequence)):  # Slide the trailing window over the sequence.
+            window = sequence[end_index - window_size + 1 : end_index + 1]  # Extract the current time window.
+            flattened: list[float] = []  # Flatten all window frames into one vector.
+            for row in window:  # Walk frames from oldest to newest inside the window.
+                for column in feature_columns:  # Walk features in the configured base order.
+                    flattened.append(_read_float(row, column))  # Append the numeric feature value.
+
+            final_row = window[-1]  # Use the newest frame for timestamp and joint target resolution.
+            examples.append(
+                MultiAxisExample(
+                    session_id=_session_id(final_row),  # Attach the current session id.
+                    timestamp_ms=int(_read_float(final_row, "timestamp_ms", default=0.0)),  # Keep the newest frame time.
+                    features=flattened,  # Store the flattened window vector.
+                    targets=[
+                        _resolve_named_target(final_row, resolved_axis_targets[axis_name])  # Resolve the residual target in the public axis order.
+                        for axis_name in axis_names
+                    ],
+                )
+            )
+
+    return MultiAxisExampleSet(
+        examples=examples,  # Attach every prepared joint example.
+        feature_columns=list(feature_columns),  # Copy the configured base feature columns.
+        feature_names=feature_names,  # Attach the computed flattened feature names.
+        window_size=window_size,  # Preserve the configured window size.
+        axis_names=axis_names,  # Preserve the joint output order used during training.
+        target_columns=dict(resolved_axis_targets),  # Preserve the logical-axis to CSV-target mapping.
+    )
+
+
 def _split_into_sequences(
     *,
     rows: Sequence[dict[str, str]],
@@ -323,12 +407,91 @@ def _split_into_sequences(
     return sequences  # Return all trainable contiguous runs.
 
 
+def _split_multi_axis_sequences(
+    *,
+    rows: Sequence[dict[str, str]],
+    feature_columns: Sequence[str],
+    target_columns: Sequence[str],
+    max_dt_ms: float,
+) -> list[list[dict[str, str]]]:
+    """Break the log into contiguous stretches that satisfy every requested joint target."""
+
+    sequences: list[list[dict[str, str]]] = []  # Accumulate contiguous trainable runs.
+    current: list[dict[str, str]] = []  # Hold the run currently being built.
+    previous_session = ""  # Track the previous session id to detect boundaries.
+
+    for row in rows:  # Walk through the raw CSV in chronological file order.
+        if not _row_is_trainable_for_target_columns(row, feature_columns, target_columns):  # Reject rows from invalid regimes or missing joint targets.
+            if current:  # Close the current run if one is open.
+                sequences.append(current)  # Save the finished run.
+                current = []  # Start fresh after the invalid boundary.
+            previous_session = ""  # Clear the previous-session marker after a hard boundary.
+            continue  # Move to the next raw row.
+
+        session_id = _session_id(row)  # Resolve the current row's session id.
+        if current:  # Only compare against a previous frame when the run is non-empty.
+            previous = current[-1]  # Inspect the last accepted row in the current run.
+            previous_ts = _read_float(previous, "timestamp_ms", default=0.0)  # Read the last accepted timestamp.
+            current_ts = _read_float(row, "timestamp_ms", default=0.0)  # Read the current row timestamp.
+            if (
+                session_id != previous_session  # Session changed.
+                or current_ts < previous_ts  # Time moved backward.
+                or current_ts - previous_ts > max_dt_ms  # Time gap is too large.
+            ):
+                sequences.append(current)  # Close the previous contiguous run.
+                current = []  # Start a new run from the current row.
+
+        current.append(row)  # Add the current trainable row to the active run.
+        previous_session = session_id  # Remember this session for the next iteration.
+
+    if current:  # Flush the final run if the file ended mid-sequence.
+        sequences.append(current)  # Save the last contiguous run.
+
+    return sequences  # Return all joint-trainable contiguous runs.
+
+
 def _row_is_trainable(
     row: dict[str, str],
     feature_columns: Sequence[str],
     target_column: str | None,
 ) -> bool:
     """Return True only for sensor-valid control frames that match the training contract."""
+
+    if not _row_passes_common_training_filters(row, feature_columns):  # Apply the shared feature and safety checks first.
+        return False  # Reject rows that do not satisfy the base training contract.
+
+    try:  # Validate the requested target availability using the same helper path as training.
+        _resolve_target(row, target_column=target_column)  # Fail if the requested residual target cannot be resolved.
+    except ValueError:  # Catch any missing or malformed field error.
+        return False  # Reject rows that cannot become valid training examples.
+
+    return True  # The row belongs to the training contract after safety filtering.
+
+
+def _row_is_trainable_for_target_columns(
+    row: dict[str, str],
+    feature_columns: Sequence[str],
+    target_columns: Sequence[str],
+) -> bool:
+    """Return True only for rows that satisfy the shared feature contract and every joint target."""
+
+    if not _row_passes_common_training_filters(row, feature_columns):  # Apply the shared feature and safety checks first.
+        return False  # Reject rows that do not satisfy the base training contract.
+
+    try:  # Validate every requested target using the same helper path as training.
+        for column in target_columns:  # Check every requested joint target column.
+            _resolve_named_target(row, column)  # Fail if any target is missing or malformed.
+    except ValueError:  # Catch any missing or malformed field error.
+        return False  # Reject rows that cannot become valid joint training examples.
+
+    return True  # The row belongs to the joint training contract after safety filtering.
+
+
+def _row_passes_common_training_filters(
+    row: dict[str, str],
+    feature_columns: Sequence[str],
+) -> bool:
+    """Return True only when a row passes the shared feature and regime checks."""
 
     if row.get("depth_valid") and not _read_flag(row, "depth_valid"):  # Drop rows with invalid depth sensing.
         return False  # Depth-dependent control cannot learn from these rows.
@@ -338,18 +501,16 @@ def _row_is_trainable(
         return False  # Balance mode is a different control regime.
     if _read_flag(row, "emergency_stop", default=False):  # Exclude emergency-stop windows.
         return False  # Emergency behavior should not be learned as nominal control.
-
     if _row_is_direct_buoyancy_override(row):  # Reject only the explicit `j/k` buoyancy override regime.
         return False  # Direct ascend/descend commands bypass the controller and should not be imitated.
 
-    try:  # Validate numeric feature and target availability using the same helper path as training.
+    try:  # Validate numeric feature availability using the same helper path as training.
         for column in feature_columns:  # Check every requested feature column.
             _read_float(row, column)  # Fail if any feature is missing or malformed.
-        _resolve_target(row, target_column=target_column)  # Fail if the requested residual target cannot be resolved.
     except ValueError:  # Catch any missing or malformed field error.
         return False  # Reject rows that cannot become valid training examples.
 
-    return True  # The row belongs to the training contract after safety filtering.
+    return True  # The row passes the shared feature and regime checks.
 
 
 def _normalized_control_mode(row: dict[str, str]) -> str:
@@ -445,3 +606,28 @@ def _session_id(row: dict[str, str]) -> str:
 
     value = row.get("session_id", "").strip()  # Read and normalize the optional session field.
     return value or "default"  # Fall back to a stable default when the field is absent.
+
+
+def _rebuild_example_set(
+    *,
+    dataset: ExampleSet | MultiAxisExampleSet,
+    examples: Sequence[Example | MultiAxisExample],
+) -> ExampleSet | MultiAxisExampleSet:
+    """Recreate an example-set dataclass while preserving dataset-level metadata."""
+
+    if isinstance(dataset, MultiAxisExampleSet):  # Rebuild the joint dataset with preserved axis metadata.
+        return MultiAxisExampleSet(
+            examples=[example for example in examples if isinstance(example, MultiAxisExample)],  # Preserve the selected joint examples in order.
+            feature_columns=list(dataset.feature_columns),  # Copy base feature-column metadata.
+            feature_names=list(dataset.feature_names),  # Copy expanded feature-name metadata.
+            window_size=dataset.window_size,  # Preserve the original window size.
+            axis_names=list(dataset.axis_names),  # Preserve the joint output order.
+            target_columns=dict(dataset.target_columns),  # Preserve the logical-axis to CSV-target mapping.
+        )
+
+    return ExampleSet(
+        examples=[example for example in examples if isinstance(example, Example)],  # Preserve the selected single-axis examples in order.
+        feature_columns=list(dataset.feature_columns),  # Copy base feature-column metadata.
+        feature_names=list(dataset.feature_names),  # Copy expanded feature-name metadata.
+        window_size=dataset.window_size,  # Preserve the original window size.
+    )

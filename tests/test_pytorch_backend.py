@@ -1,13 +1,13 @@
-"""Optional tests for the PyTorch backend.
+"""Optional tests for the PyTorch joint backend.
 
-These tests are skipped automatically when `torch` is not installed, so the legacy
-pure-Python workflow can still be tested in lightweight environments.
+These tests are skipped automatically when `torch` is not installed, so the shared
+data pipeline can still be tested in lightweight environments.
 """
 
-import csv  # Build a synthetic telemetry CSV for the backend test.
+import csv  # Build a synthetic telemetry CSV for the backend tests.
 import importlib.util  # Detect optional dependencies without importing them eagerly.
 import json  # Read exported metadata sidecars back from disk.
-import shutil  # Remove temporary directories after the test.
+import shutil  # Remove temporary directories after each test.
 import sys  # Adjust the import path when the standalone repo is executed directly.
 import unittest  # Use the standard-library test framework.
 from pathlib import Path  # Build temporary paths safely across platforms.
@@ -15,7 +15,7 @@ from pathlib import Path  # Build temporary paths safely across platforms.
 if __package__ in {None, ""}:  # Detect direct test-module execution outside package mode.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))  # Add the parent of the repo root so `learning` can be imported.
 
-from learning.data import DEFAULT_UNIFIED_FEATURE_COLUMNS  # Reuse the shared public feature contract.
+from learning.data import DEFAULT_UNIFIED_FEATURE_COLUMNS  # Reuse the shared public joint feature contract.
 
 
 TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None  # Detect whether torch is installed.
@@ -23,7 +23,7 @@ ONNX_AVAILABLE = importlib.util.find_spec("onnx") is not None  # Detect whether 
 
 
 def _write_minimal_csv(csv_path: Path) -> None:
-    """Write one small shared-schema telemetry CSV for backend tests."""
+    """Write one small shared-schema telemetry CSV for joint-backend tests."""
 
     fieldnames = [
         "session_id",
@@ -78,12 +78,12 @@ def _write_minimal_csv(csv_path: Path) -> None:
 
 @unittest.skipUnless(TORCH_AVAILABLE, "PyTorch backend requires torch")
 class PytorchBackendTests(unittest.TestCase):
-    """Verify that the optional PyTorch backend can train compatible bundles."""
+    """Verify that the optional joint PyTorch backend can train compatible bundles."""
 
-    def test_train_models_exports_three_pt_bundles(self) -> None:
-        """Verify that the PyTorch backend writes one `.pt` bundle per axis."""
+    def test_train_model_exports_one_joint_pt_bundle(self) -> None:
+        """Verify that the PyTorch backend writes one joint `.pt` bundle with three axes."""
 
-        from learning.train import train_models  # Import lazily so the module is only loaded when torch exists.
+        from learning.train import train_model  # Import lazily so the module is only loaded when torch exists.
 
         tests_dir = Path(__file__).resolve().parent
         temp_path = tests_dir / "_pytorch_train_case"
@@ -98,7 +98,7 @@ class PytorchBackendTests(unittest.TestCase):
             with csv_path.open("r", newline="", encoding="utf-8") as handle:
                 rows = [dict(row) for row in csv.DictReader(handle)]
 
-            manifest = train_models(
+            manifest = train_model(
                 rows=rows,
                 output_dir=output_dir,
                 feature_columns=DEFAULT_UNIFIED_FEATURE_COLUMNS,
@@ -121,8 +121,12 @@ class PytorchBackendTests(unittest.TestCase):
             )
 
             self.assertEqual(manifest["backend"], "pytorch")
-            for axis_name in ("depth", "forward", "yaw"):
-                self.assertTrue((output_dir / f"{axis_name}_model.pt").is_file())
+            self.assertEqual(manifest["model_type"], "shared_trunk_multi_head_mlp")
+            self.assertEqual(manifest["axis_names"], ["depth", "forward", "yaw"])
+            self.assertTrue((output_dir / "joint_model.pt").is_file())
+            self.assertIn("depth", manifest["axes"])
+            self.assertIn("forward", manifest["axes"])
+            self.assertIn("yaw", manifest["axes"])
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)
 
@@ -131,7 +135,7 @@ class PytorchCalibrationTests(unittest.TestCase):
     """Verify that calibration windows can be rebuilt from the shared telemetry contract."""
 
     def test_prepare_calibration_inputs_reuses_bundle_feature_contract(self) -> None:
-        """Verify that ESP-PPQ calibration inputs are rebuilt with the saved feature/window contract."""
+        """Verify that ESP-PPQ calibration inputs are rebuilt with the saved joint feature contract."""
 
         from learning.export import prepare_calibration_inputs
 
@@ -149,10 +153,15 @@ class PytorchCalibrationTests(unittest.TestCase):
                 bundle={
                     "metadata": {
                         "backend": "pytorch",
-                        "axis": "depth",
+                        "model_type": "shared_trunk_multi_head_mlp",
+                        "axis_names": ["depth", "forward", "yaw"],
                         "window_size": 2,
                         "feature_columns": list(DEFAULT_UNIFIED_FEATURE_COLUMNS),
-                        "target_column": "u_residual",
+                        "target_columns": {
+                            "depth": "u_residual",
+                            "forward": "forward_cmd_residual",
+                            "yaw": "yaw_cmd_residual",
+                        },
                     },
                     "input_standardizer": {
                         "means": [0.0] * input_dim,
@@ -167,7 +176,8 @@ class PytorchCalibrationTests(unittest.TestCase):
             self.assertEqual(calibration["sample_count"], 4)
             self.assertEqual(calibration["input_dim"], input_dim)
             self.assertEqual(calibration["window_size"], 2)
-            self.assertEqual(calibration["target_column"], "u_residual")
+            self.assertEqual(calibration["axis_names"], ["depth", "forward", "yaw"])
+            self.assertEqual(calibration["target_columns"]["depth"], "u_residual")
             self.assertEqual(len(calibration["samples"]), 4)
             self.assertEqual(len(calibration["samples"][0]), input_dim)
             self.assertEqual(len(calibration["timestamps_ms"]), 4)
@@ -178,10 +188,10 @@ class PytorchCalibrationTests(unittest.TestCase):
 
 @unittest.skipUnless(TORCH_AVAILABLE and ONNX_AVAILABLE, "PyTorch ONNX export requires torch and onnx")
 class PytorchExportTests(unittest.TestCase):
-    """Verify that the optional PyTorch exporter can write ONNX plus metadata sidecars."""
+    """Verify that the optional PyTorch exporter can write joint ONNX plus metadata sidecars."""
 
     def test_export_model_writes_onnx_and_metadata(self) -> None:
-        """Verify that a saved `.pt` bundle exports to ONNX with a JSON sidecar."""
+        """Verify that a saved joint `.pt` bundle exports to ONNX with a JSON sidecar."""
 
         import torch  # type: ignore[import-not-found]
 
@@ -193,47 +203,59 @@ class PytorchExportTests(unittest.TestCase):
             shutil.rmtree(temp_path, ignore_errors=True)
         temp_path.mkdir(parents=True, exist_ok=True)
         try:
-            bundle_path = temp_path / "depth_model.pt"
-            output_path = temp_path / "depth_model.onnx"
+            input_dim = len(DEFAULT_UNIFIED_FEATURE_COLUMNS) * 2
+            bundle_path = temp_path / "joint_model.pt"
+            output_path = temp_path / "joint_model.onnx"
             torch.save(
                 {
                     "metadata": {
                         "backend": "pytorch",
-                        "axis": "depth",
+                        "model_type": "shared_trunk_multi_head_mlp",
+                        "axis_names": ["depth", "forward", "yaw"],
                         "window_size": 2,
                         "feature_columns": list(DEFAULT_UNIFIED_FEATURE_COLUMNS),
-                        "feature_names": ["f"] * (len(DEFAULT_UNIFIED_FEATURE_COLUMNS) * 2),
-                        "target_column": "u_residual",
+                        "feature_names": ["f"] * input_dim,
+                        "target_columns": {
+                            "depth": "u_residual",
+                            "forward": "forward_cmd_residual",
+                            "yaw": "yaw_cmd_residual",
+                        },
                     },
                     "input_standardizer": {
-                        "means": [0.0] * (len(DEFAULT_UNIFIED_FEATURE_COLUMNS) * 2),
-                        "stds": [1.0] * (len(DEFAULT_UNIFIED_FEATURE_COLUMNS) * 2),
+                        "means": [0.0] * input_dim,
+                        "stds": [1.0] * input_dim,
                     },
-                    "target_standardizer": {"means": [0.0], "stds": [1.0]},
+                    "target_standardizer": {"means": [0.0, 0.0, 0.0], "stds": [1.0, 1.0, 1.0]},
                     "model_spec": {
-                        "input_dim": len(DEFAULT_UNIFIED_FEATURE_COLUMNS) * 2,
+                        "input_dim": input_dim,
                         "hidden_dims": [4, 2],
-                        "output_dim": 1,
+                        "output_dim": 3,
+                        "axis_names": ["depth", "forward", "yaw"],
                         "hidden_activation": "tanh",
                         "output_activation": "linear",
                     },
                     "state_dict": {
-                        "network.0.weight": torch.zeros(4, len(DEFAULT_UNIFIED_FEATURE_COLUMNS) * 2),
-                        "network.0.bias": torch.zeros(4),
-                        "network.2.weight": torch.zeros(2, 4),
-                        "network.2.bias": torch.zeros(2),
-                        "network.4.weight": torch.zeros(1, 2),
-                        "network.4.bias": torch.zeros(1),
+                        "trunk.0.weight": torch.zeros(4, input_dim),
+                        "trunk.0.bias": torch.zeros(4),
+                        "trunk.2.weight": torch.zeros(2, 4),
+                        "trunk.2.bias": torch.zeros(2),
+                        "heads.axis_depth.weight": torch.zeros(1, 2),
+                        "heads.axis_depth.bias": torch.zeros(1),
+                        "heads.axis_forward.weight": torch.zeros(1, 2),
+                        "heads.axis_forward.bias": torch.zeros(1),
+                        "heads.axis_yaw.weight": torch.zeros(1, 2),
+                        "heads.axis_yaw.bias": torch.zeros(1),
                     },
                 },
                 bundle_path,
             )
 
-            export_model(model_path=bundle_path, output_path=output_path, opset=18)
+            export_model(model_path=bundle_path, output_path=output_path, opset=13)
 
             self.assertTrue(output_path.is_file())
             metadata = json.loads(output_path.with_suffix(".metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["backend"], "pytorch")
-            self.assertEqual(metadata["metadata"]["axis"], "depth")
+            self.assertEqual(metadata["metadata"]["model_type"], "shared_trunk_multi_head_mlp")
+            self.assertEqual(metadata["metadata"]["axis_names"], ["depth", "forward", "yaw"])
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)

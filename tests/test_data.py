@@ -18,10 +18,13 @@ if __package__ in {None, ""}:  # Detect direct test-module execution outside pac
 
 from learning.data import (  # Import the data-pipeline helpers under test.
     DEFAULT_FEATURE_COLUMNS,  # Default depth-training feature set.
+    DEFAULT_JOINT_TARGET_COLUMNS,  # Default joint target mapping for the shared multi-axis model.
     DEFAULT_MULTI_AXIS_FEATURE_COLUMNS,  # Default shared multi-axis feature set.
     DEFAULT_WINDOW_SIZE,  # Default stacked-window length.
     ExampleSet,  # Dataset wrapper type returned by `build_examples`.
+    MultiAxisExampleSet,  # Joint dataset wrapper type returned by `build_multi_axis_examples`.
     build_examples,  # Convert raw rows into supervised examples.
+    build_multi_axis_examples,  # Convert raw rows into joint supervised examples.
     compute_feature_names,  # Expand feature names across a time window.
     fit_standardizer,  # Fit normalization statistics.
     load_control_rows,  # Load telemetry rows from CSV.
@@ -226,6 +229,83 @@ class DataPipelineTests(unittest.TestCase):  # Group data-pipeline tests togethe
             )  # Let the pipeline derive the forward residual from total minus base.
             self.assertEqual(len(examples.examples), 1)  # Exactly one full window should produce one example.
             self.assertEqual(examples.examples[0].target, 4.0)  # Forward residual should equal `forward_cmd_total - forward_cmd_base`.
+        finally:
+            csv_path.unlink(missing_ok=True)  # Delete the temporary CSV regardless of test outcome.
+
+    def test_build_multi_axis_examples_builds_joint_targets_from_one_window(self) -> None:
+        """Verify that one joint window carries depth, forward, and yaw residual targets together."""
+
+        tests_dir = Path(__file__).resolve().parent  # Place the temporary file near the test folder.
+        with tempfile.NamedTemporaryFile(
+            mode="w",  # Open the file in text-write mode.
+            newline="",  # Let the CSV writer manage newline handling.
+            encoding="utf-8",  # Use UTF-8 for deterministic text output.
+            suffix=".csv",  # Give the temporary file a CSV suffix.
+            dir=tests_dir,  # Keep the file inside the test directory.
+            delete=False,  # Keep the file after close so the loader can reopen it.
+        ) as handle:
+            csv_path = Path(handle.name)  # Capture the generated temporary file path.
+            writer = csv.DictWriter(
+                handle,  # Write rows into the open temporary file.
+                fieldnames=[
+                    "session_id",  # Session id used by the splitter.
+                    "timestamp_ms",  # Frame timestamp in milliseconds.
+                    "control_mode",  # Autonomous/manual control flag.
+                    "depth_valid",  # Depth sensor validity flag.
+                    "imu_valid",  # IMU validity flag.
+                    "balancing",  # Balance-mode flag.
+                    "emergency_stop",  # Emergency-stop flag.
+                    *DEFAULT_MULTI_AXIS_FEATURE_COLUMNS,  # Shared multi-axis input features.
+                    "u_total",  # Depth total control output after residual trim.
+                    "forward_cmd_total",  # Forward total control output after residual trim.
+                    "yaw_cmd_total",  # Yaw total control output after residual trim.
+                ],
+            )  # Build a CSV writer with the minimal required fields.
+            writer.writeheader()  # Emit the CSV header row.
+            for index in range(DEFAULT_WINDOW_SIZE):  # Write exactly one full window of valid rows.
+                writer.writerow(
+                    {
+                        "session_id": "Z",  # Keep all rows in one synthetic session.
+                        "timestamp_ms": index * 50,  # Space frames 50 ms apart.
+                        "control_mode": 1,  # Mark the row as autonomous.
+                        "depth_valid": 1,  # Mark depth as valid.
+                        "imu_valid": 1,  # Mark IMU as valid.
+                        "balancing": 0,  # Keep the row outside balance mode.
+                        "emergency_stop": 0,  # Keep the row outside emergency-stop mode.
+                        "depth_err_cm": 0.5 + index * 0.1,  # Vary depth error slightly across the window.
+                        "depth_speed_cm_s": -0.1,  # Keep depth speed constant for simplicity.
+                        "depth_accel_cm_s2": 0.02,  # Keep depth acceleration constant for simplicity.
+                        "roll_deg": 0.0,  # Keep roll constant for simplicity.
+                        "pitch_deg": 0.0,  # Keep pitch constant for simplicity.
+                        "gyro_x_deg_s": 0.01,  # Keep gyro-x constant for simplicity.
+                        "gyro_y_deg_s": 0.02,  # Keep gyro-y constant for simplicity.
+                        "gyro_z_deg_s": 0.03,  # Keep gyro-z constant for simplicity.
+                        "front_distance_cm": 60.0,  # Keep front sonar constant for simplicity.
+                        "left_distance_cm": 40.0,  # Keep left sonar constant for simplicity.
+                        "right_distance_cm": 38.0,  # Keep right sonar constant for simplicity.
+                        "battery_v": 11.8,  # Keep battery voltage constant for simplicity.
+                        "u_base": 80.0,  # Depth base command required by the shared feature contract.
+                        "forward_cmd_base": 1.0,  # Forward base command uses the discrete task coding contract.
+                        "forward_phase_interval_ms": 1000.0,  # Forward phase interval included in the shared feature contract.
+                        "yaw_cmd_base": -1.0,  # Yaw base command uses the discrete task coding contract.
+                        "u_total": 83.0,  # Depth total command so fallback should recover a residual of 3.
+                        "forward_cmd_total": 2.0,  # Forward total command so fallback should recover a residual of 1.
+                        "yaw_cmd_total": -0.5,  # Yaw total command so fallback should recover a residual of 0.5.
+                    }
+                )  # Write one synthetic telemetry row.
+
+        try:  # Ensure the temporary file is cleaned up even if assertions fail.
+            rows = load_control_rows(csv_path)  # Reload the synthetic CSV through the normal loader.
+            examples = build_multi_axis_examples(
+                rows,  # Pass the synthetic telemetry rows.
+                DEFAULT_MULTI_AXIS_FEATURE_COLUMNS,  # Use the default multi-axis feature set.
+                window_size=DEFAULT_WINDOW_SIZE,  # Build exactly one full-size window.
+                axis_targets=DEFAULT_JOINT_TARGET_COLUMNS,  # Request the public joint target mapping.
+            )  # Build one joint example with three targets.
+            self.assertIsInstance(examples, MultiAxisExampleSet)  # Result should be wrapped in `MultiAxisExampleSet`.
+            self.assertEqual(len(examples.examples), 1)  # Exactly one full window should produce one joint example.
+            self.assertEqual(examples.axis_names, ["depth", "forward", "yaw"])  # Joint target order should match the public contract.
+            self.assertEqual(examples.examples[0].targets, [3.0, 1.0, 0.5])  # Residual targets should be recovered axis by axis.
         finally:
             csv_path.unlink(missing_ok=True)  # Delete the temporary CSV regardless of test outcome.
 
