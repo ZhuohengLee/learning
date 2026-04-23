@@ -83,7 +83,7 @@ class PytorchBackendTests(unittest.TestCase):
     def test_train_models_exports_three_pt_bundles(self) -> None:
         """Verify that the PyTorch backend writes one `.pt` bundle per axis."""
 
-        from learning.pytorch_mlp.train import train_models  # Import lazily so the module is only loaded when torch exists.
+        from learning.train import train_models  # Import lazily so the module is only loaded when torch exists.
 
         tests_dir = Path(__file__).resolve().parent
         temp_path = tests_dir / "_pytorch_train_case"
@@ -120,7 +120,7 @@ class PytorchBackendTests(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(manifest["backend"], "pytorch_mlp")
+            self.assertEqual(manifest["backend"], "pytorch")
             for axis_name in ("depth", "forward", "yaw"):
                 self.assertTrue((output_dir / f"{axis_name}_model.pt").is_file())
         finally:
@@ -133,7 +133,7 @@ class PytorchCalibrationTests(unittest.TestCase):
     def test_prepare_calibration_inputs_reuses_bundle_feature_contract(self) -> None:
         """Verify that ESP-PPQ calibration inputs are rebuilt with the saved feature/window contract."""
 
-        from learning.pytorch_mlp.export import prepare_calibration_inputs
+        from learning.export import prepare_calibration_inputs
 
         tests_dir = Path(__file__).resolve().parent
         temp_path = tests_dir / "_pytorch_calibration_case"
@@ -148,7 +148,7 @@ class PytorchCalibrationTests(unittest.TestCase):
             calibration = prepare_calibration_inputs(
                 bundle={
                     "metadata": {
-                        "backend": "pytorch_mlp",
+                        "backend": "pytorch",
                         "axis": "depth",
                         "window_size": 2,
                         "feature_columns": list(DEFAULT_UNIFIED_FEATURE_COLUMNS),
@@ -185,7 +185,7 @@ class PytorchExportTests(unittest.TestCase):
 
         import torch  # type: ignore[import-not-found]
 
-        from learning.pytorch_mlp.export import export_model
+        from learning.export import export_model
 
         tests_dir = Path(__file__).resolve().parent
         temp_path = tests_dir / "_pytorch_export_case"
@@ -198,7 +198,7 @@ class PytorchExportTests(unittest.TestCase):
             torch.save(
                 {
                     "metadata": {
-                        "backend": "pytorch_mlp",
+                        "backend": "pytorch",
                         "axis": "depth",
                         "window_size": 2,
                         "feature_columns": list(DEFAULT_UNIFIED_FEATURE_COLUMNS),
@@ -233,7 +233,7 @@ class PytorchExportTests(unittest.TestCase):
 
             self.assertTrue(output_path.is_file())
             metadata = json.loads(output_path.with_suffix(".metadata.json").read_text(encoding="utf-8"))
-            self.assertEqual(metadata["backend"], "pytorch_mlp")
+            self.assertEqual(metadata["backend"], "pytorch")
             self.assertEqual(metadata["metadata"]["axis"], "depth")
         finally:
             shutil.rmtree(temp_path, ignore_errors=True)

@@ -20,20 +20,20 @@ def require_torch() -> None:
 
     if torch is None or nn is None:  # Reject use of the backend when PyTorch is unavailable.
         raise ImportError(
-            "PyTorch backend requires `torch`. Install PyTorch before using learning.pytorch_mlp."
+            "PyTorch backend requires `torch`. Install PyTorch before using learning."
         ) from _TORCH_IMPORT_ERROR
 
 
 if nn is not None:  # Define the real model only when PyTorch is installed.
 
     class TorchResidualMLP(nn.Module):
-        """Small two-hidden-layer MLP that mirrors the custom Python backend."""
+        """Small two-hidden-layer MLP used for residual control."""
 
         def __init__(self, *, input_dim: int, hidden_dims: Sequence[int] = (24, 12)) -> None:
             super().__init__()  # Initialize the parent `nn.Module`.
             if input_dim < 1:  # Refuse invalid model input dimensions.
                 raise ValueError("input_dim must be positive")  # Explain the constructor constraint.
-            if len(hidden_dims) != 2:  # Keep the architecture aligned with the existing firmware path.
+            if len(hidden_dims) != 2:  # Keep the architecture aligned with the current firmware plan.
                 raise ValueError("TorchResidualMLP currently expects exactly two hidden layers")  # Explain the limit.
             if any(width < 1 for width in hidden_dims):  # Refuse hidden layers with zero or negative width.
                 raise ValueError("hidden_dims must contain only positive widths")  # Explain the constructor constraint.
@@ -43,9 +43,9 @@ if nn is not None:  # Define the real model only when PyTorch is installed.
             self.hidden_dims = (hidden1, hidden2)  # Preserve the two hidden-layer widths.
             self.network = nn.Sequential(  # Build the exact forward graph in one readable block.
                 nn.Linear(self.input_dim, hidden1),  # First dense layer.
-                nn.Tanh(),  # Match the custom backend's hidden activation.
+                nn.Tanh(),  # Hidden activation.
                 nn.Linear(hidden1, hidden2),  # Second dense layer.
-                nn.Tanh(),  # Match the custom backend's hidden activation.
+                nn.Tanh(),  # Hidden activation.
                 nn.Linear(hidden2, 1),  # Scalar residual output.
             )
 
@@ -61,4 +61,3 @@ else:
 
         def __init__(self, *args, **kwargs) -> None:
             require_torch()  # Always raise the dependency error.
-

@@ -10,21 +10,23 @@ Reading route:
 from __future__ import annotations  # Defer type-hint evaluation for cleaner forward references.
 
 import argparse  # Parse command-line arguments for the export CLI.
+import contextlib  # Temporarily redirect noisy exporter stdout on Windows GBK consoles.
 import importlib.util  # Detect optional dependencies such as `onnx` and `ppq`.
+import io  # Hold redirected exporter logs in memory.
 import json  # Write metadata sidecars and manifests.
 from pathlib import Path  # Build input and output paths safely across platforms.
 import sys  # Adjust import path when running this file as a script.
 from typing import Sequence  # Type ordered collections without requiring a concrete container.
 
 if __package__ in {None, ""}:  # Detect direct script execution outside package mode.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # Add the repo root so `learning` can be imported.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # Add the repo root so `learning` can be imported.
 
 from learning.data import (  # Reuse the shared telemetry contract for calibration-data preparation.
     Standardizer,  # Rebuild input normalization from the saved training bundle.
     build_examples,  # Convert calibration CSV rows into windowed feature vectors.
     load_control_rows,  # Load calibration telemetry from the shared CSV format.
 )
-from learning.pytorch_mlp.model import TorchResidualMLP, require_torch  # Import the PyTorch backend and dependency guard.
+from learning.model import TorchResidualMLP, require_torch  # Import the PyTorch backend and dependency guard.
 
 
 AXIS_EXPORTS = {
@@ -159,15 +161,16 @@ def export_model(
     model = _restore_model_from_bundle(bundle)  # Recreate the `nn.Module` with trained weights.
     dummy_input = torch.zeros(1, int(bundle["model_spec"]["input_dim"]), dtype=torch.float32)  # Match the fixed batch-1 ESP-DL input contract.
     output_path.parent.mkdir(parents=True, exist_ok=True)  # Create the ONNX output directory before export.
-    torch.onnx.export(
-        model,
-        dummy_input,
-        output_path,
-        input_names=["input"],
-        output_names=["residual"],
-        opset_version=opset,
-        do_constant_folding=True,
-    )
+    with contextlib.redirect_stdout(io.StringIO()):  # Suppress torch.onnx Unicode-rich progress logs that break on GBK consoles.
+        torch.onnx.export(
+            model,
+            dummy_input,
+            output_path,
+            input_names=["input"],
+            output_names=["residual"],
+            opset_version=opset,
+            do_constant_folding=True,
+        )
 
     metadata = _bundle_metadata(bundle, model_path=model_path, onnx_path=output_path)  # Build the JSON-safe ONNX metadata payload.
     metadata_path = output_path.with_suffix(".metadata.json")  # Place the ONNX sidecar next to the ONNX file.
@@ -176,7 +179,7 @@ def export_model(
     print(f"wrote ONNX metadata to {metadata_path}")  # Tell the user where the ONNX sidecar was written.
 
     result: dict[str, object] = {
-        "backend": "pytorch_mlp",  # Record the backend used to create these artifacts.
+        "backend": "pytorch",  # Record the backend used to create these artifacts.
         "source_bundle": str(model_path),  # Record the original `.pt` bundle path.
         "onnx_path": str(output_path),  # Record the ONNX output path.
         "onnx_metadata_path": str(metadata_path),  # Record the ONNX metadata sidecar path.
@@ -209,7 +212,7 @@ def export_model(
     espdl_metadata_path.write_text(
         json.dumps(
             {
-                "backend": "pytorch_mlp",  # Record the backend used to create the deployment artifact.
+                "backend": "pytorch",  # Record the backend used to create the deployment artifact.
                 "source_bundle": str(model_path),  # Preserve the source `.pt` path for traceability.
                 "onnx_path": str(output_path),  # Record the ONNX intermediate used for quantization.
                 "calibration_csv": str(calibration_csv),  # Record which telemetry CSV powered PTQ.
@@ -270,7 +273,7 @@ def export_axis_models(
         espdl_output_dir.mkdir(parents=True, exist_ok=True)
 
     manifest: dict[str, object] = {
-        "backend": "pytorch_mlp",  # Record the backend used to create these exports.
+        "backend": "pytorch",  # Record the backend used to create these exports.
         "opset": opset,  # Record the ONNX opset used for the intermediate files.
         "espdl_target": target if espdl_output_dir is not None else None,  # Record the requested deployment target when applicable.
         "espdl_num_of_bits": num_of_bits if espdl_output_dir is not None else None,  # Record the requested quantization precision when applicable.
@@ -464,7 +467,7 @@ def _bundle_metadata(bundle: dict[str, object], *, model_path: Path, onnx_path: 
     if not isinstance(metadata, dict):  # Reject malformed bundle payloads.
         raise ValueError("metadata must be a mapping")
     return {
-        "backend": "pytorch_mlp",  # Record which backend produced the exported artifact.
+        "backend": "pytorch",  # Record which backend produced the exported artifact.
         "source_bundle": str(model_path),  # Record which `.pt` bundle produced this ONNX file.
         "onnx_path": str(onnx_path),  # Record the ONNX output path.
         "metadata": metadata,  # Preserve the saved training metadata payload.
@@ -551,7 +554,11 @@ def _require_onnx() -> None:
     """Raise a clear error when ONNX export dependencies are missing."""
 
     if importlib.util.find_spec("onnx") is None:  # Detect whether the ONNX package is importable.
-        raise ImportError("PyTorch ONNX export requires the `onnx` package. Install it before using learning.pytorch_mlp.export.")
+        raise ImportError("PyTorch ONNX export requires the `onnx` package. Install it before using learning.export.")
+    if importlib.util.find_spec("onnxscript") is None:  # Detect whether the Torch ONNX exporter support package is importable.
+        raise ImportError(
+            "PyTorch ONNX export also requires `onnxscript` with current torch releases. Install it before using learning.export."
+        )
 
 
 def _require_esp_ppq() -> None:

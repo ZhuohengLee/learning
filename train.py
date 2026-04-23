@@ -1,8 +1,10 @@
 """Train depth, forward, and yaw residual models with the PyTorch backend.
 
-The telemetry contract matches `learning.data`. The output of this backend is a `.pt`
-bundle per axis plus a JSON manifest. These bundles are intended for later ONNX export
-and then ESP-PPQ / ESP-DL deployment.
+Reading route:
+1. Start with `main()` for CLI wiring.
+2. Then read `train_models()` because it is the public three-axis training entry.
+3. Then read `_train_single_axis()` for the actual optimization loop.
+4. Finally read the normalization and device helpers near the bottom.
 """
 
 from __future__ import annotations  # Defer type-hint evaluation for cleaner forward references.
@@ -15,7 +17,7 @@ import sys  # Adjust import path when running this file as a script.
 from typing import Sequence  # Accept generic ordered collections as inputs.
 
 if __package__ in {None, ""}:  # Detect direct script execution outside package mode.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # Add the repo root so `learning` can be imported.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # Add the repo root so `learning` can be imported.
 
 from learning.data import (  # Reuse telemetry loading and dataset-prep helpers.
     DEFAULT_UNIFIED_FEATURE_COLUMNS,  # Default shared feature set for all three public axis models.
@@ -26,7 +28,7 @@ from learning.data import (  # Reuse telemetry loading and dataset-prep helpers.
     load_control_rows,  # Load raw telemetry rows from CSV.
     split_examples_by_session,  # Split examples without session leakage.
 )
-from learning.pytorch_mlp.model import TorchResidualMLP, require_torch  # Import the PyTorch backend and dependency guard.
+from learning.model import TorchResidualMLP, require_torch  # Import the PyTorch backend and dependency guard.
 
 
 DEFAULT_AXIS_TARGETS = {
@@ -132,7 +134,7 @@ def train_models(
     prepared_rows = _augment_missing_axis_targets(rows, axis_targets)
     device = _resolve_device(torch=torch, device_name=device_name)
     manifest: dict[str, object] = {
-        "backend": "pytorch_mlp",
+        "backend": "pytorch",
         "feature_columns": list(feature_columns),
         "window_size": window_size,
         "device": str(device),
@@ -318,7 +320,7 @@ def _train_single_axis(
 
     bundle = {
         "metadata": {
-            "backend": "pytorch_mlp",
+            "backend": "pytorch",
             "axis": source_axis,
             "window_size": window_size,
             "feature_columns": list(feature_columns),
@@ -422,4 +424,3 @@ def _resolve_device(*, torch, device_name: str):
 
 if __name__ == "__main__":
     main()
-
