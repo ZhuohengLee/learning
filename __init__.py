@@ -1,13 +1,12 @@
 """Training helpers for residual robot-control experiments.
 
-The `learning` package covers three steps:
-1. load telemetry exported by the robot,
-2. train small residual neural networks in pure Python,
-3. export trained weights into formats the ESP32 firmware can use.
+The `learning` package has one shared data layer and two backends:
+1. `data.py` holds the telemetry schema, filtering rules, and normalization helpers.
+2. `python_mlp/` keeps the original hand-written Python MLP -> JSON -> C++ header flow.
+3. `pytorch_mlp/` is the new PyTorch backend meant for ONNX / ESP-DL style deployment.
 
 Reading route:
-1. Start with `train.py` because it is the public single-entry trainer for depth + forward + yaw.
-2. Then read `export.py` because it is the public single-entry exporter for both one-bundle and three-axis deployment.
-3. Then read `data.py` to understand how telemetry becomes training examples.
-4. Then read `model.py` to see the exact MLP and training loop.
+1. Start with `data.py` because both backends share the same telemetry contract.
+2. Then read `python_mlp/train.py` if you want the current lightweight firmware path.
+3. Then read `pytorch_mlp/train.py` if you want the new PyTorch training path.
 """

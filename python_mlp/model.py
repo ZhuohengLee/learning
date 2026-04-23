@@ -218,24 +218,25 @@ class MLPRegressor:
                 )
             )  # Append a fully restored DenseLayer.
         model.layers = restored_layers  # Replace the placeholder layers with restored ones.
-        return model  # Return the reconstructed model instance.
+        return model  # Return the fully restored model instance.
 
 
 def _activate(value: float, activation: str) -> float:
-    """Apply the configured activation function."""
+    """Apply the requested activation function."""
 
-    if activation == "linear":  # Output layer uses identity activation.
-        return value  # Return the affine term unchanged.
-    if activation == "tanh":  # Hidden layers use hyperbolic tangent.
-        return math.tanh(value)  # Apply the nonlinearity.
-    raise ValueError(f"unsupported activation: {activation}")  # Explain unknown activation names.
+    if activation == "linear":  # Leave linear activations untouched.
+        return value  # The identity function.
+    if activation == "tanh":  # Use hyperbolic tangent for hidden layers.
+        return math.tanh(value)  # Keep outputs bounded inside [-1, 1].
+    raise ValueError(f"unsupported activation: {activation}")  # Reject unknown activation names.
 
 
-def _activate_derivative(output_value: float, activation: str) -> float:
-    """Return the derivative using the already-computed neuron output."""
+def _activate_derivative(output: float, activation: str) -> float:
+    """Compute the derivative using the already-activated output value."""
 
-    if activation == "linear":  # Derivative of identity is constant.
-        return 1.0  # Return the linear derivative.
-    if activation == "tanh":  # Derivative can be expressed from tanh output directly.
-        return 1.0 - output_value * output_value  # Use `1 - tanh(x)^2`.
-    raise ValueError(f"unsupported activation: {activation}")  # Explain unknown activation names.
+    if activation == "linear":  # The derivative of identity is constant.
+        return 1.0  # Identity derivative.
+    if activation == "tanh":  # Use the stable derivative formula in terms of the output.
+        return 1.0 - output * output  # Derivative of tanh.
+    raise ValueError(f"unsupported activation: {activation}")  # Reject unknown activation names.
+

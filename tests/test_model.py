@@ -5,14 +5,9 @@ Reading route:
 2. Then read `test_export_contains_architecture_and_parameters()` to see serialization expectations.
 """
 
-import sys  # Adjust the import path when the standalone repo is executed directly.
 import unittest  # Use the standard-library test framework.
-from pathlib import Path  # Resolve the standalone repo path safely across platforms.
 
-if __package__ in {None, ""}:  # Detect direct test-module execution outside package mode.
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))  # Add the parent of the repo root so `learning` can be imported.
-
-from learning.model import MLPRegressor  # Import the model under test.
+from learning.python_mlp.model import MLPRegressor  # Import the model under test.
 
 
 class ModelTests(unittest.TestCase):  # Group model-behavior tests together.

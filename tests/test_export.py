@@ -17,7 +17,7 @@ if __package__ in {None, ""}:  # Detect direct test-module execution outside pac
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))  # Add the parent of the repo root so `learning` can be imported.
 
 from learning.data import DEFAULT_UNIFIED_FEATURE_COLUMNS  # Reuse the shared public feature contract.
-from learning.export import export_axis_models, render_header  # Import the exporter under test.
+from learning.python_mlp.export import export_axis_models, render_header  # Import the exporter under test.
 
 
 SAMPLE_MODEL_PATH = Path(__file__).resolve().parent.parent / "artifacts" / "sample_model.json"  # Reuse the checked-in sample bundle.

@@ -26,7 +26,7 @@ import sys  # Adjust import path when running this file as a script.
 from typing import Sequence  # Accept generic ordered collections as inputs.
 
 if __package__ in {None, ""}:  # Detect direct script execution outside package mode.
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # Add the parent of the repo root so `learning` can be imported.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # Add the repo root so `learning` can be imported.
 
 from learning.data import (  # Reuse telemetry loading and dataset-prep helpers.
     DEFAULT_UNIFIED_FEATURE_COLUMNS,  # Default shared feature set for all three public axis models.
@@ -37,7 +37,7 @@ from learning.data import (  # Reuse telemetry loading and dataset-prep helpers.
     load_control_rows,  # Load raw telemetry rows from CSV.
     split_examples_by_session,  # Split examples without session leakage.
 )
-from learning.model import MLPRegressor  # Tiny pure-Python regressor used for training.
+from learning.python_mlp.model import MLPRegressor  # Tiny pure-Python regressor used for training.
 
 
 DEFAULT_AXIS_TARGETS = {
@@ -133,6 +133,7 @@ def train_models(
     output_dir.mkdir(parents=True, exist_ok=True)  # Ensure the destination directory exists.
     prepared_rows = _augment_missing_axis_targets(rows, axis_targets)  # Backfill residual targets when older logs lack them.
     manifest: dict[str, object] = {
+        "backend": "python_mlp",  # Record which backend produced the bundles.
         "feature_columns": list(feature_columns),  # Record the shared base feature set.
         "window_size": window_size,  # Record the shared stacked history length.
         "axes": {},  # Fill this mapping with one entry per trained axis.
@@ -293,6 +294,7 @@ def _train_single_axis(
     best_model = MLPRegressor.from_dict(best_snapshot)  # Restore the best validation checkpoint for export.
     bundle = {
         "metadata": {
+            "backend": "python_mlp",  # Record the backend used for this bundle.
             "axis": source_axis,  # Record the logical control axis.
             "window_size": window_size,  # Record the stacked-frame count.
             "feature_columns": list(feature_columns),  # Record the base input-feature order.
@@ -357,3 +359,4 @@ def _denormalized_metrics(model, samples, target_standardizer) -> dict[str, floa
 
 if __name__ == "__main__":  # Run the CLI when the file is executed directly.
     main()  # Start unified three-axis training.
+

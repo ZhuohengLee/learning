@@ -18,7 +18,7 @@ if __package__ in {None, ""}:  # Detect direct test-module execution outside pac
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))  # Add the parent of the repo root so `learning` can be imported.
 
 from learning.data import DEFAULT_UNIFIED_FEATURE_COLUMNS  # Reuse the public trainer's default shared feature set.
-from learning.train import train_models  # Import the public single-entry trainer under test.
+from learning.python_mlp.train import train_models  # Import the pure-Python trainer under test.
 
 
 class TrainModelsTests(unittest.TestCase):  # Group public-trainer tests together.
